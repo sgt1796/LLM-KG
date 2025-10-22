@@ -1,0 +1,7 @@
+python fetch_ncbi.py --csv csv-adhd-set.csv --out papers --n 50
+
+bash sample_papers.sh 50 papers sampled_papers # sample papers
+python main.py --pdf sampled_papers --output graph.json # retrive KG from papers
+python dedupe.py --input graph.json --output graph_clean.json --spacy-model en_core_sci_sm --min-support 3 --verbose-every 5000
+python KG_visualizer.py --k-core 4 --max-nodes 200 --label-top 20 --min-weight 3 --largest-only --input graph_clean.json
+python KG_visualizer.py --k-core 3 --max-nodes 300 --label-top 10 --highlight-edges-top 20 --edge-labels-top 10 --min-weight 50 --input graph_clean.json --layout spring --largest-only
