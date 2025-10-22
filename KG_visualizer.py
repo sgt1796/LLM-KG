@@ -23,6 +23,7 @@ import matplotlib.patheffects as path_effects
 import networkx as nx
 from collections import Counter, defaultdict
 import numpy as np
+import re
 
 # ---------------- CLI ----------------
 ap = argparse.ArgumentParser()
@@ -37,6 +38,16 @@ ap.add_argument("--label-top", type=int, default=20, help="Label top-K nodes by 
 ap.add_argument("--seed", type=int, default=42, help="Layout seed")
 ap.add_argument("--highlight-edges-top", type=int, default=20, help="Highlight top-K strongest edges")
 ap.add_argument("--edge-labels-top", type=int, default=10, help="Show edge labels for top-K strongest edges")
+ap.add_argument("--drop-node-regex", nargs="*", default=[
+    r"(?i)\b(doi|https?://|creativecommons|open access|license|permissions?|submission|accepted|received|revised|editor|author(s|ship)?|affiliations?|journal|publisher|figure|fig\.?|table|supplementary|on-line issn|eissn)\b",
+    r"(?i)\b(color figure|color figure charges|copyright holder|credit line|publication|submit|org)\b",
+], help="Regexes; nodes matching any are removed")
+
+ap.add_argument("--drop-rel-regex", nargs="*", default=[
+    r"(?i)\b(license|permissions?|submitted|accepted|received|revised|published|editorial|copyright|doi|url)\b"
+], help="Regexes; relations matching any are removed")
+ap.add_argument("--min-node-len", type=int, default=2,
+                help="Drop nodes with fewer than N letters (after stripping non-letters)")
 ap.add_argument("--layout", choices=[
     "bipartite", "circular", 
     "kamada_kawai", "planar", "random", "rescale", 
@@ -49,6 +60,19 @@ in_path = Path(args.input)
 if not in_path.exists():
     raise SystemExit(f"Missing input: {in_path}")
 
+_node_rex = [re.compile(p) for p in args.drop_node_regex]
+_rel_rex  = [re.compile(p) for p in args.drop_rel_regex]
+def _is_bad_node(s: str) -> bool:
+    if any(R.search(s) for R in _node_rex):
+        return True
+    # very short / mostly non-letters
+    letters = "".join(ch for ch in s if ch.isalpha())
+    return len(letters) < args.min_node_len
+
+def _is_bad_rel(r: str | None) -> bool:
+    if not r: 
+        return False
+    return any(R.search(r) for R in _rel_rex)
 # ------------- Robust loader -------------
 def load_graph(p: Path):
     """Load a knowledge graph from JSON or JSONL.
@@ -189,23 +213,28 @@ nodes, edges, rel_counts, rel_bag = load_graph(in_path)
 G = nx.Graph()
 # add nodes (keeping any attributes present)
 for n in nodes:
-    if isinstance(n, dict):
-        nid = str(n.get("id", n.get("name", n.get("label"))))
-        if nid is None:
-            continue
-        attrs = {k: v for k, v in n.items() if k not in ("id", "name", "label")}
-        G.add_node(nid, **attrs)
-    else:
-        G.add_node(str(n))
+    nid = str(n.get("id", n.get("name", n.get("label")))) if isinstance(n, dict) else str(n)
+    if not nid or _is_bad_node(nid):
+        continue
+    attrs = {k: v for k, v in n.items() if isinstance(n, dict) and k not in ("id", "name", "label")}
+    G.add_node(nid, **attrs)
 
 # add edges with threshold
 for u, v, w in edges:
-    if float(w) >= args.min_weight:
-        lab = None
-        bag = rel_bag.get((u, v)) or rel_bag.get((v, u))  # handle undirected symmetry
-        if bag:
-            lab = bag.most_common(1)[0][0]
-        G.add_edge(u, v, weight=float(w), label=lab)
+    # skip edges if either endpoint would be dropped
+    if _is_bad_node(u) or _is_bad_node(v):
+        continue
+    if float(w) < args.min_weight:
+        continue
+    lab = None
+    bag = rel_bag.get((u, v)) or rel_bag.get((v, u))  # undirected symmetry
+    if bag:
+        # pick strongest relation but drop if it's junk
+        top_rel = bag.most_common(1)[0][0]
+        if _is_bad_rel(top_rel):
+            continue
+        lab = top_rel
+    G.add_edge(u, v, weight=float(w), label=lab)
 
 # Remove isolates after thresholding
 isolates = list(nx.isolates(G))
