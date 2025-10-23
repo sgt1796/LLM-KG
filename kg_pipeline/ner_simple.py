@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import re
 from typing import Iterable, List, Set, Tuple
+import sys
+import json
 
 
 class NERExtractor:
@@ -94,3 +96,24 @@ class NERExtractor:
             if ents:
                 results.append((sent, ents))
         return results
+
+
+def _demo() -> None:
+    if len(sys.argv) < 2:
+        print("Usage: python ner_simple.py \"Your text here\"")
+        sys.exit(0)
+
+    text = sys.argv[1]
+    ner = NERExtractor()
+    results = ner.extract(text)
+
+    print("\nPer-sentence entities:")
+    for sent, ents in results:
+        print(f"- {sent}\n  -> {sorted(ents)}")
+
+    print("\nStructured entities:")
+    print(json.dumps(results, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":  # pragma: no cover
+    _demo()

@@ -57,6 +57,8 @@ class DataAcquisition:
             encoding="utf-8",
         )
         if result.returncode != 0:
+            if result.returncode == 2:
+                print("Couldn't find pdftotext. Please install it via \napt-get install poppler-utils")
             raise RuntimeError(
                 f"pdftotext failed for {pdf} with code {result.returncode}:\n{result.stderr}"
             )

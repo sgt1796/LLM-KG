@@ -23,6 +23,7 @@ from kg_pipeline import (
     DocumentDigestor,
     NERExtractor,
     SpacyNER,
+    LLMNER,
     WeightedTupleBuilder,
     WeightedTupleMerger,
     TripletKnowledgeGraphBuilder,
@@ -40,6 +41,8 @@ def parse_args() -> argparse.Namespace:
                         help="Optional path to an existing graph JSON to merge with")
     parser.add_argument("--summary", action="store_true",
                         help="Print a short summary of each document")
+    parser.add_argument("--ner", type=str, choices=["simple", "spacy", "llm"], default="simple",
+                        help="Named Entity Recognition method to use")
     return parser.parse_args()
 
 
@@ -74,15 +77,12 @@ def main() -> None:
     # switch to spaCy-based extraction, replace NERExtractor() with
     # SpacyNER().
     ner = None
-    # Attempt to instantiate a spaCy-based extractor if available
-    if SpacyNER is not None:
-        try:
-            ner = SpacyNER()  # type: ignore[call-arg]
-        except Exception:
-            ner = None
-    if ner is None:
-        # Fallback to the simple heuristic extractor
+    if args.ner == "simple":
         ner = NERExtractor()
+    elif args.ner == "spacy":
+        ner = SpacyNER()
+    elif args.ner == "llm":
+        ner = LLMNER()
 
     for i, pdf_path in enumerate(pdf_paths, start=1):
         try:
@@ -111,6 +111,7 @@ def main() -> None:
             else:
                 # type: ignore[attr-defined] – SpacyNER has an ``extract`` method
                 sentence_entities = ner.extract(text, mode="sentences")  # type: ignore
+                #print(f"    [DEBUG] Extracted sentence entities: {sentence_entities}")
             print(f"    Found {len(sentence_entities)} sentence(s) with entities.")
 
             # Accumulate into the global triplet builder

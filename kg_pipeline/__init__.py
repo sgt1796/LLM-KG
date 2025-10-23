@@ -10,6 +10,7 @@ from .data_acquisition import DataAcquisition  # noqa: F401
 from .digestor import DocumentDigestor         # noqa: F401
 from .ner_simple import NERExtractor           # noqa: F401
 from .ner import SpacyNER  # type: ignore  # noqa: F401
+from .ner_llm import LLMNER               # noqa: F401
 from .tuple_builder import WeightedTupleBuilder  # noqa: F401
 from .tuple_merger import WeightedTupleMerger    # noqa: F401
 
@@ -22,6 +23,7 @@ __all__ = [
     "DocumentDigestor",
     "NERExtractor",
     "SpacyNER",
+    "LLMNER",
     "WeightedTupleBuilder",
     "WeightedTupleMerger",
     "TripletKnowledgeGraphBuilder",

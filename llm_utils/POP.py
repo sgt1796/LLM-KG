@@ -255,8 +255,8 @@ class PromptFunction:
 
         Args:
             description (str): What the function should do.
-            meta_prompt (str): Optionally override the meta prompt.
-            meta_schema (dict): Optionally override the meta schema.
+            meta_prompt (str): Optionally override the meta prompt, path to file.
+            meta_schema (dict): Optionally override the meta schema, path to file.
             model (str): Which model to use.
             save (bool): whether to store to functions/ directory
 
@@ -277,27 +277,22 @@ class PromptFunction:
         if meta_prompt is None:
             try:
                 meta_prompt = PromptFunction.load_prompt(
-                    "prompts/openai-function_description_generator.md"
+                    "prompts/openai-json_schema_generator.md"
                 )
             except FileNotFoundError:
                 raise FileNotFoundError(
-                    "Meta prompt file 'prompts/openai-function_description_generator.md' not found. "
+                    "Meta prompt file 'prompts/openai-json_schema_generator.md' not found. "
                     "Either place it there or pass meta_prompt manually."
                 )
+        else:
+            meta_prompt = PromptFunction.load_prompt(meta_prompt)
 
         # fallback meta schema from file
         if meta_schema is None:
-            try:
-                meta_schema = json.loads(
-                    PromptFunction.load_prompt(
-                        "prompts/openai-function_description_generator.fmt"
-                    )
-                )
-            except FileNotFoundError:
-                raise FileNotFoundError(
-                    "Meta schema file 'prompts/openai-function_description_generator.fmt' not found. "
-                    "Either place it there or pass meta_schema manually."
-                )
+            pass
+        else:   
+            with open(meta_schema, "r", encoding="utf-8") as f:
+                meta_schema = json.load(f)
 
         completion = self.client.chat_completion(
             model=model,
@@ -306,7 +301,7 @@ class PromptFunction:
             messages=[
                 {
                     "role": "system",
-                    "content": PromptFunction.load_prompt("prompts/openai-function_description_generator.md"),
+                    "content": meta_prompt,
                 },
                 {
                     "role": "user",
@@ -314,7 +309,6 @@ class PromptFunction:
                 },
             ],
         )
-
         parsed_schema = json.loads(completion.choices[0].message.content)
 
         # store to disk if requested
