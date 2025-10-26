@@ -7,6 +7,7 @@ lightweight to minimise external dependencies.
 """
 
 from .data_acquisition import DataAcquisition  # noqa: F401
+from .chunking import DocumentChunker        # noqa: F401
 from .digestor import DocumentDigestor         # noqa: F401
 from .ner_simple import NERExtractor           # noqa: F401
 from .ner import SpacyNER  # type: ignore  # noqa: F401
@@ -28,4 +29,5 @@ __all__ = [
     "WeightedTupleMerger",
     "TripletKnowledgeGraphBuilder",
     "TripletGraphMerger",
+    "DocumentChunker",
 ]

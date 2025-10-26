@@ -23,69 +23,165 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Set, Tuple
+import re
+
+# -----------------------------------------------------------------------------
+# Canonical relation patterns and their synonyms
+#
+# These mappings expand on the original heuristic for relation extraction by
+# recognising common biomedical phrasing and rewriting them to a small set of
+# canonical predicates.  Patterns are declared at module scope so they can be
+# reused by both the relation extractor and the graph builder when checking
+# relative positions of verbs.
+
+_CANON_SYNONYMS: Dict[str, List[str]] = {
+    "associated with": [
+        "is associated with", "associated with", "associated to", "linked to", "linked with",
+        "is linked to", "links to", "link to", "link with", "related with", "related to"
+    ],
+    "causes": [
+        "leads to", "results in", "cause of", "causes", "lead to", "result in",
+        "affects", "affect", "induces", "induce", "triggers", "trigger", "triggered",
+        "increase risk of", "increase risk for", "raises risk of", "raises risk for"
+        , "increases the risk of", "increases the risk for", "increases risk of", "increases risk for",
+        "increase the risk of", "increase the risk for"
+    ],
+    "risk for": [
+        "risk for", "risk of", "risk factor for", "risk factors for"
+    ],
+    "interacts with": [
+        "interacts with", "interact with", "interacts"
+    ],
+    "binds": [
+        "binds to", "binds with", "binds", "bind to", "bind with", "bind", "binds onto"
+    ],
+    "regulates": [
+        "regulates", "regulate", "controls", "control", "modulates", "modulate"
+    ],
+    "inhibits": [
+        "inhibits", "inhibit", "suppresses", "suppress", "downregulates", "downregulate"
+    ],
+    "activates": [
+        "activates", "activate", "stimulates", "stimulate", "upregulates", "upregulate"
+    ],
+    "increases": [
+        "increases", "increase", "enhances", "enhance", "raises", "raise"
+    ],
+    "decreases": [
+        "decreases", "decrease", "reduces", "reduce", "lowers", "lower"
+    ],
+    "treats": [
+        "treats", "treat", "therapy for", "remedy for", "cures", "cure"
+    ],
+    "prevents": [
+        "prevents", "prevent", "avoids", "avoid", "protects against", "protect against"
+    ],
+    "predicts": [
+        "predicts", "predict"
+    ],
+    "correlates with": [
+        "correlates with", "correlate with", "correlates", "correlate"
+    ],
+    "promotes": [
+        "promotes", "promote", "facilitates", "facilitate"
+    ],
+    "suppresses": [
+        "suppresses", "suppress", "down-regulates", "down-regulate"
+    ],
+    "mediates": [
+        "mediates", "mediate"
+    ],
+    "expresses": [
+        "expresses", "express"
+    ],
+    "encodes": [
+        "encodes", "encode"
+    ],
+}
+
+# Flatten the synonym mapping into a list of (synonym, canonical) pairs sorted
+# by descending length to prefer longer multi‑word matches.  This is recomputed
+# after the canonical mapping is defined so that any updates to
+# ``_CANON_SYNONYMS`` are reflected in the flattened list.
+_SYNONYM_PAIRS: List[Tuple[str, str]] = []
+for _canon, _syns in _CANON_SYNONYMS.items():
+    for _syn in _syns:
+        _SYNONYM_PAIRS.append((_syn, _canon))
+_SYNONYM_PAIRS.sort(key=lambda x: len(x[0]), reverse=True)
+
+# A simple list of canonical relation labels; used as a secondary fall‑back
+_VERBISH: List[str] = list(_CANON_SYNONYMS.keys())
 
 
 def _extract_relation(span: str, sentence: str = "", left_ctx: str = "", right_ctx: str = "") -> str:
-    if not span:
-        cleaned = ""
-    else:
-        cleaned = span.strip()
-    # Normalize case
+    """Extract a canonical relation phrase from the text between two entities.
+
+    This helper uses a multi‑stage heuristic to identify meaningful
+    predicates that link two entity mentions.  It first normalises and
+    searches the span for known relation patterns (verbs and short
+    phrases).  If none are found in the span, it will fall back to
+    scanning the immediate left and right context of the span.  If no
+    useful relation can be identified the function returns either
+    ``"related_to"`` or a special ``"__SKIP__`` token to indicate that
+    the pair should be skipped entirely.
+
+    Parameters
+    ----------
+    span : str
+        The substring of the original sentence between two entity
+        mentions.  This is lower‑cased and stripped of leading/trailing
+        whitespace for matching.
+    sentence : str, optional
+        The full sentence containing the entities.  Used when
+        falling back to context scanning.
+    left_ctx : str, optional
+        Up to 20 characters of context immediately preceding the span.
+    right_ctx : str, optional
+        Up to 20 characters of context immediately following the span.
+
+    Returns
+    -------
+    str
+        A canonical relation phrase or special token.  Returning
+        ``"__SKIP__"`` indicates that the span contains only junk words
+        and no triple should be recorded.  Returning ``"related_to"``
+        provides a generic edge when no specific relation is detected.
+    """
+
+    # Normalise the span: collapse whitespace and lowercase it
+    cleaned = span.strip() if span else ""
     low = cleaned.lower()
-    # If empty/long, try to fish a nearby predicate; otherwise bail
+
+    # If the span is empty or extremely long, treat it as uninformative
     if not low or len(low) > 50:
         low = ""
 
-    # Canonicalization table (simple phrase rewrites)
-    CANON = {
-        "is associated with": "associated with",
-        "associated to": "associated with",
-        "linked to": "associated with",
-        "linked with": "associated with",
-        "leads to": "causes",
-        "results in": "causes",
-        "risk for": "risk for",
-        "risk of": "risk for",
-        "interacts with": "interacts with",
-        "binds to": "binds",
-        "regulates": "regulates",
-        "inhibits": "inhibits",
-        "activates": "activates",
-        "increases": "increases",
-        "decreases": "decreases",
-        "treats": "treats",
-        "prevents": "prevents",
-    }
+    # A minimal stopword set used to flag spans consisting solely of junk
+    JUNK = {"and", "of", "with", "in", "for", "the", "between", "to", "by", "on", "from", "at", "as"}
 
-    # Pure function-word junk that should not create a triple
-    JUNK = {"and","of","with","in","for","the","between","to","by","on","from","at","as"}
-
-    if low in JUNK:
+    # If the span itself consists solely of junk words, skip this pair entirely
+    if low and all(tok in JUNK for tok in low.split()):
         return "__SKIP__"
 
-    # Try to collapse multiword junk like "and adolescent", "in the"
-    tokens = low.split()
-    if all(tok in JUNK for tok in tokens):
-        return "__SKIP__"
+    # Attempt to find a known relation phrase directly in the span
+    if low:
+        for syn, canon in _SYNONYM_PAIRS:
+            if syn in low:
+                return canon
 
-    # Canonicalize known phrases
-    for k, v in CANON.items():
-        if low == k or low.startswith(k+" "):
+    # If nothing matched in the span, also search in the immediate context
+    ctx = f"{left_ctx.lower()} {low} {right_ctx.lower()}"
+    for syn, canon in _SYNONYM_PAIRS:
+        if syn in ctx:
+            return canon
+
+    # As a final heuristic, look for any of the canonical relations in the context
+    for v in _VERBISH:
+        if v in ctx:
             return v
 
-    # If we still have nothing helpful, peek a small context window
-    # (cheap heuristic: scan left/right contexts for a verb-like keyword)
-    if not low:
-        VERBISH = ["inhibits","activates","causes","associated with","predicts","correlates with",
-                   "treats","prevents","increases","decreases","binds","regulates","promotes",
-                   "suppresses","mediates","expresses","encodes"]
-        ctx = " ".join([left_ctx.lower()[-40:], right_ctx.lower()[:40]])
-        for v in VERBISH:
-            if v in ctx:
-                return v
-        return "related_to"
-
-    return low
+    # If no relation found, return the generic relation
+    return "related_to"
 
 @dataclass
 class TripletKnowledgeGraphBuilder:
@@ -125,22 +221,50 @@ class TripletKnowledgeGraphBuilder:
         """
         pos_list: List[Tuple[int, str]] = []
         sent_low = sentence.lower()
+        # Precompile regex patterns for each entity to match whole words.  This
+        # prevents partial matching of substrings (e.g. entity "C" matching
+        # the letter "c" in "interacts").  If no whole‑word match is found
+        # we fall back to a simple substring search to ensure we still
+        # capture approximate positions.
         for ent in entities:
-            # approximate match: find first occurrence ignoring case
-            idx = sent_low.find(ent.lower())
-            if idx >= 0:
-                pos_list.append((idx, ent))
+            ent_clean = ent.strip()
+            if not ent_clean:
+                continue
+            ent_low = ent_clean.lower()
+            # Build a regex that matches the entity as a whole word.  Word
+            # boundaries (\b) ensure we don't match substrings inside
+            # larger tokens.  Some biomedical entities include hyphens or
+            # other punctuation; escaping handles those safely.
+            try:
+                import re  # local import to avoid a global dependency if unused
+                pattern = re.compile(r"\b" + re.escape(ent_low) + r"\b", re.IGNORECASE)
+                match = pattern.search(sentence)
+                if match:
+                    idx = match.start()
+                else:
+                    # fallback: approximate match by substring search
+                    idx = sent_low.find(ent_low)
+                    if idx < 0:
+                        continue
+            except Exception:
+                # as a last resort, use substring search
+                idx = sent_low.find(ent_low)
+                if idx < 0:
+                    continue
+            pos_list.append((idx, ent_clean))
         # sort by starting index to maintain textual order
         pos_list.sort(key=lambda x: x[0])
         return pos_list
 
     def add_sentence(self, sentence: str, entities: Set[str]) -> None:
-        """Add triples for all unordered pairs of entities in a sentence.
+        """Update the internal graph with relational triples for a single sentence.
 
-        Entities are first sorted by their occurrence in the sentence to
-        establish a deterministic subject–object orientation.  For
-        every pair of distinct entities, the substring between the two
-        mentions is extracted and normalised to serve as the relation.
+        This method records each entity as a node and then delegates to
+        :meth:`extract_triplets` to compute candidate subject–relation–object
+        tuples.  Only canonical relations (as identified by
+        ``_extract_relation``) are considered – generic ``related_to`` links
+        and junk spans are ignored.  The weight for each triple is
+        incremented by one for every occurrence.
 
         Parameters
         ----------
@@ -149,41 +273,135 @@ class TripletKnowledgeGraphBuilder:
         entities : set of str
             The unique entity names found in the sentence.
         """
-        # Record nodes regardless of whether we find pairs
+        # Record every entity as a node, regardless of pairwise relations
         for e in entities:
             self.nodes.add(e)
-        # Only consider pairs of distinct entities
-        if len(entities) < 2:
-            return
-        # Sort entities by their first occurrence in the sentence
+        # Extract meaningful triples from this sentence
+        triples = self.extract_triplets(sentence, entities)
+        for subj, relation, obj in triples:
+            self.triples[(subj, relation, obj)] += 1
+
+    def extract_triplets(self, sentence: str, entities: Set[str]) -> List[Tuple[str, str, str]]:
+        """Return a list of relational triples present in a sentence.
+
+        This helper computes subject–relation–object tuples for all
+        ordered pairs of distinct entities that co‑occur in the provided
+        sentence.  It uses the same heuristics as :meth:`add_sentence`
+        to detect canonical relations and avoid spurious links.  Generic
+        ``related_to`` relations and spans containing only stopwords are
+        omitted from the output.
+
+        Parameters
+        ----------
+        sentence : str
+            The full sentence containing the entity mentions.
+        entities : set of str
+            The unique entity strings extracted from the sentence.
+
+        Returns
+        -------
+        list of tuples
+            A list of ``(subject, relation, object)`` triplets for which
+            a meaningful relation was detected.
+        """
+        result: List[Tuple[str, str, str]] = []
+        if not entities or len(entities) < 2:
+            return result
+        # Determine positions of entities within the sentence
         pos_entities = self._entity_positions(sentence, entities)
-        # Fallback: if positions are missing for some entities, simply
-        # iterate through all combinations in sorted entity names
+        # Fallback: if positions are missing for some entities, we cannot
+        # reliably orient subject/object order.  In that case, we refrain
+        # from generating any relation-specific triples and return an
+        # empty list, delegating to generic co-occurrence if needed.
         if not pos_entities or len(pos_entities) < 2:
-            sorted_ents = sorted(entities)
-            for i in range(len(sorted_ents)):
-                for j in range(i + 1, len(sorted_ents)):
-                    subj, obj = sorted_ents[i], sorted_ents[j]
-                    relation = "related_to"
-                    self.triples[(subj, relation, obj)] += 1
-            return
-        # Generate triples for every pair
+            return result
         n = len(pos_entities)
         for i in range(n):
             subj_pos, subj = pos_entities[i]
             for j in range(i + 1, n):
                 obj_pos, obj = pos_entities[j]
-                # extract text between the end of subject and start of object
+                # Extract the raw substring between the two entity mentions
                 start = subj_pos + len(subj)
                 end = obj_pos
                 span = sentence[start:end]
-                # light context for verb fallback
-                left_ctx = sentence[max(0, start-20):start]
-                right_ctx = sentence[end:min(len(sentence), end+20)]
+                # Capture a small amount of surrounding context to aid in
+                # relation extraction when the span is empty or too long
+                left_ctx = sentence[max(0, start - 20):start]
+                right_ctx = sentence[end:min(len(sentence), end + 20)]
                 relation = _extract_relation(span, sentence, left_ctx, right_ctx)
-                if relation == "__SKIP__":
-                    continue  # don't record junk-only connectors
-                self.triples[(subj, relation, obj)] += 1
+                # Skip spans that produce no informative relation
+                if relation in ("__SKIP__",""): # for now reserve  "related_to"
+                    continue
+                # Ensure that the canonical relation occurs within the span itself.
+                # If it was only detected via context, disregard this pair.
+                span_lower = span.lower()
+                contains_rel = False
+                for syn, canon in _SYNONYM_PAIRS:
+                    if canon == relation and syn in span_lower:
+                        contains_rel = True
+                        break
+                if not contains_rel:
+                    continue
+                # Avoid transitive/enum relations for non‑adjacent entities
+                skip_triple = False
+                if j > i + 1:
+                    # Determine position of the next entity between subject and object
+                    inter_pos, inter_ent = pos_entities[i + 1]
+                    # Lower‑case span for matching intermediate entity
+                    span_lower_full = span.lower()
+                    inter_idx = None
+                    try:
+                        pat = re.compile(r"\b" + re.escape(inter_ent.lower()) + r"\b")
+                        m = pat.search(span_lower_full)
+                        if m:
+                            inter_idx = m.start()
+                    except Exception:
+                        pass
+                    if inter_idx is None:
+                        inter_idx = span_lower_full.find(inter_ent.lower())
+                    # Collect positions of the relation phrase(s) in the span
+                    rel_positions: List[int] = []
+                    for syn, canon in _SYNONYM_PAIRS:
+                        if canon == relation:
+                            search_start = 0
+                            while True:
+                                idx = span_lower_full.find(syn, search_start)
+                                if idx == -1:
+                                    break
+                                rel_positions.append(idx)
+                                search_start = idx + 1
+                    if inter_idx is not None and rel_positions:
+                        # If any relation occurs after the intermediate entity
+                        if any(pos > inter_idx for pos in rel_positions):
+                            skip_triple = True
+                if skip_triple:
+                    continue
+                # Additional guard: ensure the subsegment between the intermediate
+                # entity and the object contains only simple conjunctions for
+                # non‑adjacent entities.  This prevents linking to remote
+                # clauses (e.g. "acts as").
+                if j > i + 1:
+                    # Determine the substring between the end of the first
+                    # intermediate entity and the start of the current object
+                    inter_start, inter_ent = pos_entities[i + 1]
+                    inter_end = inter_start + len(inter_ent)
+                    sub_span = sentence[inter_end:obj_pos].lower()
+                    try:
+                        words = re.findall(r"\b\w+\b", sub_span)
+                    except Exception:
+                        words = sub_span.split()
+                    # In enumeration constructs, other entity names may appear
+                    # between the intermediate and the target (e.g., "B, C and D").
+                    # We therefore allow known entity tokens as well as simple
+                    # conjunctions.  Any extra word outside these sets causes
+                    # the triple to be skipped.
+                    allowed_conj = {"and", "or"}
+                    # Build a set of lowercased entity names for quick lookup
+                    entity_tokens = {e.lower() for _, e in pos_entities}
+                    if any((w not in allowed_conj) and (w not in entity_tokens) for w in words):
+                        continue
+                result.append((subj, relation, obj))
+        return result
 
     def build_from_sentences(self, sentence_entities: Iterable[Tuple[str, Set[str]]]) -> None:
         """Populate the graph from an iterable of (sentence, entities) tuples."""

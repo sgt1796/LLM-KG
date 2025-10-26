@@ -1,9 +1,0 @@
-{
-  "triple_dropped_unresolvable": 498,
-  "triples_seen": 454547,
-  "rel_related_to": 52976,
-  "rel_other": 401571,
-  "filtered_min_support": 440885,
-  "final_kept": 5657,
-  "unique_triples_after_agg": 446542
-}

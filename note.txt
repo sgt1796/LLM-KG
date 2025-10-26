@@ -14,4 +14,4 @@ II. SUD KG building
 
 python KG_visualizer.py --k-core 3 --max-nodes 300 --label-top 10 --highlight-edges-top 20 --edge-labels-top 10 --min-weight 50 --input graph_clean.json --layout spring --largest-only
 python pyvis_view.py --input graph_clean_ADHD_SUD.json --html graph_viz.html --min-weight 30 --k-core 3 --max-nodes 300 --label-top 10
-python pyvis_view.py --input graph_clean_ADHD_SUD.json --html graph_viz.html --weight "3-58" --k-core 2 --max-nodes 500 --max-edges 400 --label-top 20 --physics random
+python pyvis_view.py --input graph_clean_ADHD_SUD.json --html graph_viz.html --weight "3-58" --k-core 2 --max-nodes 500 --max-edges 400 --label-top 20 --physics barnesHut

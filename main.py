@@ -28,6 +28,7 @@ from kg_pipeline import (
     WeightedTupleMerger,
     TripletKnowledgeGraphBuilder,
     TripletGraphMerger,
+    DocumentChunker
 )
 
 
@@ -41,8 +42,15 @@ def parse_args() -> argparse.Namespace:
                         help="Optional path to an existing graph JSON to merge with")
     parser.add_argument("--summary", action="store_true",
                         help="Print a short summary of each document")
-    parser.add_argument("--ner", type=str, choices=["simple", "spacy", "llm"], default="simple",
+    parser.add_argument("--ner", type=str, choices=["simple", "spacy", "openai", "ollama"], default="simple",
                         help="Named Entity Recognition method to use")
+    parser.add_argument(
+                        "--chunking",
+                        type=str,
+                        choices=["none", "sections", "abstract_discussion"],
+                        default="none",
+                        help="Document chunking method to use before NER."
+                    )
     return parser.parse_args()
 
 
@@ -72,6 +80,8 @@ def main() -> None:
     # One global triplet builder to accumulate triples across ALL PDFs
     kg_builder = TripletKnowledgeGraphBuilder()
 
+    chunker = DocumentChunker()
+
     # Choose your NER implementation.  Use the simple regex extractor by default
     # because spaCy may not be available in the runtime environment.  To
     # switch to spaCy-based extraction, replace NERExtractor() with
@@ -81,8 +91,10 @@ def main() -> None:
         ner = NERExtractor()
     elif args.ner == "spacy":
         ner = SpacyNER()
-    elif args.ner == "llm":
-        ner = LLMNER()
+    elif args.ner == "openai":
+        ner = LLMNER(client="openai", model="gpt-5-nano", temperature=1) # gpt 5 doesn't support temperature 0
+    elif args.ner == "ollama":
+        ner = LLMNER(client="ollama", model="minstral", temperature=0.0)
 
     for i, pdf_path in enumerate(pdf_paths, start=1):
         try:
@@ -91,31 +103,40 @@ def main() -> None:
             da = DataAcquisition(pdf_path)
             text = da.read()
             print(f"    Extracted {len(text)} characters.")
-
-            # Optional summary
-            if args.summary:
-                digestor = DocumentDigestor(max_sentences=5)
-                summary = digestor.digest(text)
-                print("    Summary:")
-                print("    " + "\n    ".join(summary.splitlines()))
-
-            # Entity extraction (returns iterable of (sentence, set(entities)))
-            # When using the simple NER, call .extract(); for spaCy wrapper
-            # call .extract(..., mode="sentences") for compatibility.
-            # Extract entities grouped by sentence.  The simple heuristic
-            # extractor exposes an ``extract`` method returning
-            # ``List[Tuple[str, Set[str]]]``.  The spaCy wrapper accepts a
-            # ``mode`` parameter to request sentence‑level output.
-            if isinstance(ner, NERExtractor):
-                sentence_entities = ner.extract(text)
+            # Optional chunking
+            if args.chunking == "sections":
+                chunks = chunker.chunk_by_sections(text)
+            elif args.chunking == "abstract_discussion":
+                chunks = chunker.chunk_abstract_discussion(text)
             else:
-                # type: ignore[attr-defined] – SpacyNER has an ``extract`` method
-                sentence_entities = ner.extract(text, mode="sentences")  # type: ignore
-                #print(f"    [DEBUG] Extracted sentence entities: {sentence_entities}")
-            print(f"    Found {len(sentence_entities)} sentence(s) with entities.")
+                chunks = chunker.no_chunk(text)
 
-            # Accumulate into the global triplet builder
-            kg_builder.build_from_sentences(sentence_entities)  # type: ignore[arg-type]
+            for j, text in enumerate(chunks, start=1):
+                print(f"    Processing chunk {j}/{len(chunks)} with {len(text)} characters.")
+                # Optional summary
+                if args.summary:
+                    digestor = DocumentDigestor(max_sentences=1)
+                    summary = digestor.digest(text)
+                    print("    Summary:")
+                    print("    " + "\n    ".join(summary.splitlines()))
+
+                # Entity extraction (returns iterable of (sentence, set(entities)))
+                # When using the simple NER, call .extract(); for spaCy wrapper
+                # call .extract(..., mode="sentences") for compatibility.
+                # Extract entities grouped by sentence.  The simple heuristic
+                # extractor exposes an ``extract`` method returning
+                # ``List[Tuple[str, Set[str]]]``.  The spaCy wrapper accepts a
+                # ``mode`` parameter to request sentence‑level output.
+                if isinstance(ner, NERExtractor):
+                    sentence_entities = ner.extract(text)
+                else:
+                    # type: ignore[attr-defined] – SpacyNER has an ``extract`` method
+                    sentence_entities = ner.extract(text, mode="sentences")  # type: ignore
+                    #print(f"    [DEBUG] Extracted sentence entities: {sentence_entities}")
+                print(f"    Found {len(sentence_entities)} sentence(s) with entities.")
+
+                # Accumulate into the global triplet builder
+                kg_builder.build_from_sentences(sentence_entities)  # type: ignore[arg-type]
 
         except Exception as e:
             # Keep going even if one file fails

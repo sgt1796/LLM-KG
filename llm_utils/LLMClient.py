@@ -297,3 +297,107 @@ class DoubaoClient(LLMClient):
         except Exception as e:
             raise RuntimeError(f"Doubao chat_completion error: {e}")
         return response
+
+class OllamaClient(LLMClient):
+    """
+    Ollama-compatible LLM client using the /api/generate endpoint.
+    """
+
+    def __init__(self, model="llama3:latest", base_url="http://localhost:11434", default_options=None, timeout=120):
+        self.model = model
+        self.base_url = base_url
+        # sensible defaults for extraction tasks
+        self.default_options = default_options or {
+            "num_ctx": 8192,        # ↑ context window so long docs don't truncate
+            "temperature": 0.1,     # low variance, more literal
+            "top_p": 0.9,
+            "top_k": 40,
+            "repeat_penalty": 1.05,
+            "mirostat": 0           # disable mirostat for predictable outputs
+        }
+        self.timeout = timeout
+
+    def chat_completion(self, messages: list, model: str = None, temperature: float = 0.7, **kwargs):
+        # Extract a proper system string for /api/generate
+        system_parts, user_assistant_lines = [], []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "system":
+                system_parts.append(content)
+            elif role == "assistant":
+                user_assistant_lines.append(f"[Assistant]: {content}")
+            else:
+                user_assistant_lines.append(f"[User]: {content}")
+
+        system = "\n".join(system_parts) if system_parts else None
+        prompt = "\n".join(user_assistant_lines)
+
+        # Merge caller-provided options with our defaults
+        # Allow both a dict under 'ollama_options' and top-level knobs (max_tokens -> num_predict)
+        caller_opts = kwargs.pop("ollama_options", {}) or {}
+        options = {**self.default_options, **caller_opts}
+
+        # keep legacy temperature kw in sync with options
+        if temperature is not None:
+            options["temperature"] = temperature
+
+        payload = {
+            "model": model or self.model,
+            "prompt": prompt,
+            "stream": False,
+            # num_predict must be top level for /api/generate
+            "num_predict": kwargs.get("max_tokens", 1024),
+            "options": options,
+        }
+
+        # pass system separately (clearer than prepending to prompt)
+        if system:
+            payload["system"] = system
+
+        # JSON mode / schema
+        fmt = kwargs.get("response_format")
+        if fmt:
+            fmt = self._normalize_schema(fmt)
+            payload["format"] = fmt  # raw JSON schema or "json"
+
+        # optional stops and keep-alive
+        if "stop" in kwargs and kwargs["stop"]:
+            payload["stop"] = kwargs["stop"]
+        if "keep_alive" in kwargs and kwargs["keep_alive"]:
+            payload["keep_alive"] = kwargs["keep_alive"]
+
+        try:
+            response = requests.post(f"{self.base_url}/api/generate", json=payload, timeout=self.timeout)
+            response.raise_for_status()
+            content = response.json().get("response", "")
+            return self._wrap_response(content)
+        except Exception as e:
+            raise RuntimeError(f"OllamaClient error: {e}")
+    # normalize: accept raw dict, {"schema": {...}}, JSON string, or path
+    def _normalize_schema(self, fmt):
+        import json, os
+        if fmt is None:
+            return None
+        if isinstance(fmt, str):
+            # try file path, else JSON string
+            if os.path.exists(fmt):
+                return json.load(open(fmt, "r", encoding="utf-8"))
+            return json.loads(fmt)
+        if isinstance(fmt, dict) and "schema" in fmt and isinstance(fmt["schema"], dict):
+            return fmt["schema"]              # <-- unwrap OpenAI-style wrapper
+        if isinstance(fmt, dict):
+            return fmt                         # already a schema object
+        raise TypeError("response_format must be a JSON schema dict, a JSON string, or a file path")
+
+    def _wrap_response(self, content: str):
+        class Message:
+            def __init__(self, content): self.content = content; self.tool_calls = None
+
+        class Choice:
+            def __init__(self, message): self.message = message
+
+        class Response:
+            def __init__(self, content): self.choices = [Choice(Message(content))]
+
+        return Response(content)

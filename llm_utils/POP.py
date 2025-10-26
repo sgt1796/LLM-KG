@@ -3,22 +3,24 @@ import json
 import requests
 from dotenv import load_dotenv
 from os import getenv, path
-from .LLMClient import LLMClient, OpenAIClient, GeminiClient, DeepseekClient, LocalPyTorchClient, DoubaoClient
+from .LLMClient import LLMClient, OpenAIClient, GeminiClient, DeepseekClient, LocalPyTorchClient, DoubaoClient, OllamaClient
 
 # Load environment variables
 load_dotenv()
 default_model = {
-    "OpenAIClient": "gpt-4o-mini",
+    "OpenAIClient": "gpt-5-nano",
     "GeminiClient": "gemini-2.5-flash",
     "DeepseekClient": "deepseek-chat",
     "DoubaoClient": "doubao-seed-1-6-flash-250715",
+    "OllamaClient": "mistral:7b",
 }
 client_map = {
             "openai": OpenAIClient,
             "gemini": GeminiClient,
             "local": LocalPyTorchClient,
             "deepseek": DeepseekClient,
-            "doubao": DoubaoClient
+            "doubao": DoubaoClient,
+            "ollama": OllamaClient
         }
 
 ##############################################
@@ -245,7 +247,7 @@ class PromptFunction:
                         description: str = None,
                         meta_prompt: str = None,
                         meta_schema: dict = None,
-                        model: str = "gpt-4o-mini",
+                        model: str = "gpt-5-mini",
                         save: bool = True
                        ) -> dict:
         """
@@ -328,7 +330,7 @@ class PromptFunction:
 
     def generate_code(self, 
                     schema: dict | str = None,
-                    model: str = "gpt-4o",
+                    model: str = "gpt-5",
                     save: bool = True) -> str:
         """
         Generate actual Python code for a function, given its meta schema.

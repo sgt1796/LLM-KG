@@ -14,11 +14,11 @@ def run_command(command):
 # Step 2: Fetch SUD Papers
 #run_command("python fetch_ncbi.py --csv csv-substanceu-set.csv --out papers_SUD")
 
-# Step 3: Sample 10 Papers from ADHD
-run_command("bash sample_papers.sh 10 papers_ADHD sampled_papers_adhd")
+# Step 3: Sample 50 Papers from ADHD
+run_command("bash sample_papers.sh 50 papers_ADHD sampled_papers_adhd")
 
-# Step 4: Sample 10 Papers from SUD
-run_command("bash sample_papers.sh 100 papers_SUD sampled_papers_sud")
+# Step 4: Sample 50 Papers from SUD
+run_command("bash sample_papers.sh 50 papers_SUD sampled_papers_sud")
 
 # Step 5: Run KG Extraction for ADHD Papers with LLMNER
 run_command("python main.py --pdf sampled_papers_adhd --output graph_adhd_llm.json --ner llm")
@@ -33,4 +33,5 @@ run_command("python main.py --pdf sampled_papers_sud --output graph_combined_llm
 run_command("python dedupe.py --input graph_combined_llm.json --output graph_clean_llm.json --spacy-model en_core_sci_sm --min-support 3 --verbose-every 50000")
 
 # Step 9: Visualize the Cleaned Graph
+
 run_command("python KG_visualizer.py --k-core 3 --max-nodes 300 --label-top 10 --highlight-edges-top 20 --edge-labels-top 10 --min-weight 50 --input graph_clean_llm.json --layout spring --largest-only")
