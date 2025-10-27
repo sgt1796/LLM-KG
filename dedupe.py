@@ -198,6 +198,7 @@ def aggregate_triple_graph(
     output_jsonl: str,
     spacy_model: str,
     min_support: int = 2,
+    max_sources: int = 16,
     verbose_every: int = 500000,
     write_stats: bool = True,
 ):
@@ -236,6 +237,9 @@ def aggregate_triple_graph(
 
     stats = collections.Counter()
     counts = collections.Counter()
+    # NEW: provenance stores per (h,r,t)
+    ev_seen = collections.defaultdict(set)    # (h,r,t) -> set of dedupe keys
+    ev_list = collections.defaultdict(list)   # (h,r,t) -> list of evidence dicts
 
     required_keys = {"subject", "object"}
     triple_iter = iter_all_objects_with_keys(input_path, required_keys)
@@ -245,6 +249,7 @@ def aggregate_triple_graph(
         raw_t = next((obj.get(k) for k in obj.keys() if k.lower() == "object"), None)
         raw_r = next((obj.get(k) for k in obj.keys() if k.lower() == "relation"), None)
         raw_w = obj.get("weight", 1)
+        raw_sources = next((obj.get(k) for k in obj.keys() if k.lower() == "sources"), None)
         h = norm_ent(raw_s)
         t = norm_ent(raw_t)
         r = norm_relation(raw_r) if raw_r is not None else ""
@@ -257,7 +262,36 @@ def aggregate_triple_graph(
             w = int(raw_w) if raw_w is not None else 1
         except Exception:
             w = 1
-        counts[(h, r, t)] += w
+        key = (h, r, t)
+        counts[key] += w
+
+        # NEW: merge evidence if present
+        if isinstance(raw_sources, list) and raw_sources:
+            seen = ev_seen[key]
+            kept = ev_list[key]
+            for s in raw_sources:
+                if not isinstance(s, dict):
+                    continue
+                doc_id = s.get("doc_id")
+                chunk_id = s.get("chunk_id", 0)
+                sentence_id = s.get("sentence_id", 0)
+                # char_span can be list/tuple/missing
+                cs = s.get("char_span") or [0, 0]
+                try:
+                    cs_t = tuple(cs) if isinstance(cs, (list, tuple)) else (0, 0)
+                except Exception:
+                    cs_t = (0, 0)
+                dk = (doc_id, chunk_id, sentence_id, cs_t)
+                if dk in seen:
+                    continue
+                seen.add(dk)
+                if len(kept) < max_sources:
+                    # keep original dict (already JSON-safe); ensure char_span is list for output consistency
+                    s = dict(s)
+                    if isinstance(s.get("char_span"), tuple):
+                        s["char_span"] = list(s["char_span"])
+                    kept.append(s)
+
         stats["triples_seen"] += 1
         if r == "related_to":
             stats["rel_related_to"] += 1
@@ -277,7 +311,8 @@ def aggregate_triple_graph(
                 if w < min_support:
                     stats["filtered_min_support"] += 1
                     continue
-                rec = {"h": h, "r": r, "t": t, "weight": int(w), "sources": []}
+                srcs = ev_list.get((h, r, t), [])
+                rec = {"h": h, "r": r, "t": t, "weight": int(w), "sources": srcs}
                 out.write(orjson.dumps(rec) + b"\n")
                 final_kept += 1
         stats["final_kept"] = final_kept
@@ -293,7 +328,13 @@ def aggregate_triple_graph(
             if w < min_support:
                 stats["filtered_min_support"] += 1
                 continue
-            triples_out.append({"subject": h, "relation": r, "object": t, "weight": int(w)})
+            triples_out.append({
+                "subject": h,
+                "relation": r,
+                "object": t,
+                "weight": int(w),
+                "sources": ev_list.get((h, r, t), []),
+            })
             nodes_set.add(h)
             nodes_set.add(t)
             final_kept += 1
@@ -498,6 +539,7 @@ def main():
                     help="e.g., en_core_web_sm | en_core_web_md | en_core_sci_sm")
     ap.add_argument("--min-support", type=int, default=2)
     ap.add_argument("--verbose-every", type=int, default=500000)
+    ap.add_argument("--max-sources", type=int, default=16, help="Cap number of evidence rows kept per triple")
     args = ap.parse_args()
 
     # Decide whether this is a triple graph or a D3 graph based on the presence of a top-level
@@ -508,6 +550,7 @@ def main():
             output_jsonl=args.output,
             spacy_model=args.spacy_model,
             min_support=args.min_support,
+            max_sources=args.max_sources,
             verbose_every=args.verbose_every,
         )
     else:

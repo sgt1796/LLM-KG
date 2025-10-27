@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, json, math
+import argparse, json, math, ast
 from collections import Counter, defaultdict
 from pathlib import Path
 from statistics import median
@@ -27,7 +27,9 @@ args = ap.parse_args()
 # ---------- Loader (supports nodes/edges, triples, JSONL) ----------
 def load_graph(p: Path):
     rel_counts = Counter()
-    rel_bag = defaultdict(Counter)
+    rel_bag = defaultdict(Counter)          # (u,v) -> Counter(rel -> w)
+    edge_sources = defaultdict(set)          # (u,v) -> {source,...}
+    node_sources = defaultdict(set)          # node -> {source,...}
     if p.suffix.lower() == ".jsonl":
         nodes, edges = {}, []
         for line in open(p, encoding="utf-8"):
@@ -41,6 +43,7 @@ def load_graph(p: Path):
             t = rec.get("t") or rec.get("object")
             r = rec.get("r") or rec.get("relation", "")
             w = rec.get("weight", 1)
+            srcs = rec.get("sources", []) or []
             if h is None or t is None: continue
             u, v = str(h), str(t)
             try: w = float(w)
@@ -50,8 +53,12 @@ def load_graph(p: Path):
             if r:
                 rel_counts[r] += w
                 rel_bag[(u, v)][r] += w
+            if srcs:
+                for s in srcs:
+                    edge_sources[(u, v)].add(str(s))
+                    node_sources[u].add(str(s)); node_sources[v].add(str(s))
         node_list = [{"id": n, **attrs} for n, attrs in nodes.items()]
-        return node_list, edges, rel_counts, rel_bag
+        return node_list, edges, rel_counts, rel_bag, edge_sources, node_sources
 
     data = json.load(open(p, encoding="utf-8"))
 
@@ -63,6 +70,7 @@ def load_graph(p: Path):
             r = tri.get("r") or tri.get("relation", "")
             t = tri.get("t") or tri.get("object")
             w = tri.get("weight", 1)
+            srcs = tri.get("sources", []) or []
             if h is None or t is None: continue
             u, v = str(h), str(t)
             try: w = float(w)
@@ -72,8 +80,12 @@ def load_graph(p: Path):
             if r:
                 rel_counts[r] += w
                 rel_bag[(u, v)][r] += w
+            if srcs:
+                for s in srcs:
+                    edge_sources[(u, v)].add(str(s))
+                    node_sources[u].add(str(s)); node_sources[v].add(str(s))
         node_list = [{"id": n, **attrs} for n, attrs in nodes.items()]
-        return node_list, edges, rel_counts, rel_bag
+        return node_list, edges, rel_counts, rel_bag, edge_sources, node_sources
 
     # D3-style / list-of-edges
     nodes, edges_raw = [], []
@@ -114,14 +126,14 @@ def load_graph(p: Path):
 
     if not nodes:
         nodes = [{"id": n} for n in node_ids]
-    return nodes, norm_edges, rel_counts, rel_bag
+    return nodes, norm_edges, rel_counts, rel_bag, edge_sources, node_sources
 
 # ---------- Build + filter ----------
 in_path = Path(args.input)
 if not in_path.exists():
     raise SystemExit(f"Missing input: {in_path}")
 
-nodes, edges, rel_counts, rel_bag = load_graph(in_path)
+nodes, edges, rel_counts, rel_bag, edge_sources, node_sources = load_graph(in_path)
 
 G = nx.Graph()
 for n in nodes:
@@ -171,9 +183,131 @@ for u, v, w in edges:
 if args.max_edges > 0 and len(filtered_edges) > args.max_edges:
     filtered_edges = sorted(filtered_edges, key=lambda x: x[2], reverse=True)[:args.max_edges]
 
-# Add edges to the graph
+def _parse_source(x):
+    """Return either a dict (rich meta) or a plain string. Never raises."""
+    # already structured
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, (list, tuple, set)):
+        # take first element if someone nested it accidentally
+        x = next(iter(x), "") if x else ""
+    # stringify
+    s = str(x).strip()
+    if not s:
+        return ""
+    # Handle double-encoded JSON string (e.g., a JSON blob stored as a quoted string)
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        try:
+            inner = json.loads(s)
+            if isinstance(inner, str) and inner.startswith("{") and inner.endswith("}"):
+                try:
+                    return json.loads(inner)
+                except Exception:
+                    pass
+            if isinstance(inner, str):
+                s = inner
+        except Exception:
+            pass
+    # Try strict JSON first
+    if s.startswith("{") and s.endswith("}"):
+        try:
+            return json.loads(s)
+        except Exception:
+            # Try Python-literal (handles single quotes, None, True/False)
+            try:
+                obj = ast.literal_eval(s)
+                return obj if isinstance(obj, dict) else s
+            except Exception:
+                return s
+    return s
+
+def _clip(v, lim=100):
+        # Clip a string to a maximum length, adding "..." if truncated.
+        v = str(v)
+        return v if len(v) <= lim else v[: lim - 3] + "..."
+
+def _fmt_one_source(s) -> str:
+    src = _parse_source(s)
+    if isinstance(src, dict):
+        fn   = src.get("doc_meta", {}).get("filename", "")
+        did  = src.get("doc_id")
+        sid  = src.get("sentence_id")
+        span = src.get("char_span")
+        conf = src.get("confidence")
+        ev   = (src.get("evidence") or "")
+
+        # normalize evidence to a single logical line
+        ev = " ".join(ev.split())
+
+        lines = []
+        if fn:   lines.append(f"[file]: {_clip(fn)}")
+        if did:  lines.append(f"[doc_id]: {_clip(did)}")
+        if sid is not None:  lines.append(f"[sentence_id]: {_clip(sid)}")
+        if span is not None: lines.append(f"[char_span]: {_clip(span)}")
+        if conf is not None: lines.append(f"[confidence]: {_clip(conf)}")
+        if ev:
+            lines.append("[evidence]:")
+            lines.append(f"    {_clip(ev)}")
+
+        return "\n".join(lines) if lines else "<source>"
+
+    return _clip(str(src))
+
+def _normalize_sources(srcs):
+    """Flatten containers into a simple list (dicts or strings)."""
+    if not srcs:
+        return []
+    if isinstance(srcs, (list, tuple, set)):
+        out = []
+        for x in srcs:
+            if isinstance(x, (list, tuple, set)):
+                out.extend(list(x))
+            else:
+                out.append(x)
+        return out
+    return [srcs]
+
+def _fmt_sources(sources, limit=5) -> str:
+    """Group multiple sources by (doc_id, filename) to reduce repetition."""
+    if not sources:
+        return ""
+    grouped = {}
+    for s in sources:
+        src = _parse_source(s)
+        if not isinstance(src, dict):
+            key = ("<unknown>", "<unknown>")
+            grouped.setdefault(key, []).append(str(src))
+            continue
+        fn = src.get("doc_meta", {}).get("filename", "")
+        did = src.get("doc_id", "<unknown>")
+        key = (did, fn)
+        grouped.setdefault(key, []).append(src)
+
+    lines = []
+    for (did, fn), group in list(grouped.items())[:limit]:
+        lines.append(f"[doc_id]: {did}  \n[file]: {fn}")
+        for g in group:
+            ev = g.get("evidence") or ""
+            if ev:
+                ev = " ".join(ev.split())
+                ev = ev[:97] + "..." if len(ev) > 100 else ev
+                lines.append(f"> [evidence]: {ev}")
+
+    return "\n".join(lines)
+
+# Add edges to the graph (with provenance in hover)
 for u, v, w, label in filtered_edges:
-    G.add_edge(u, v, weight=w, label=label, title=f"{label or 'related_to'} | w={w}")
+    srcs = edge_sources.get((u, v)) or edge_sources.get((v, u)) or set()
+    src_txt = _fmt_sources(srcs, limit=6)
+    # Store sources on the edge so later passes can see them
+    G.add_edge(
+        u, v,
+        weight=float(w),
+        label=label,
+        sources=list(srcs),                 # <-- keep raw list
+        title=(f"{label or 'related_to'} | w={w}"
+               + (f"\n\n—— sources ——\n{src_txt}" if src_txt else ""))
+    )
 
 # prune isolates
 G.remove_nodes_from(list(nx.isolates(G)))
@@ -217,8 +351,9 @@ except Exception:
 for n in G.nodes():
     d = deg.get(n, 0)
     size = 10 + 25 * math.sqrt(d / max_deg)  # 10..35-ish
-    G.nodes[n]["value"] = size          # affects node size
-    G.nodes[n]["title"] = f"{n} | deg={d}"
+    G.nodes[n]["value"] = size  # affects node size
+    src_txt = _fmt_sources(node_sources.get(n), limit=6)
+    G.nodes[n]["title"] = (f"{n} | deg={d}" + (f"\n\n—— sources ——\n{src_txt}" if src_txt else ""))
     G.nodes[n]["label"] = n if n in labels else ""  # label only top-K
     if n in comm_map:
         G.nodes[n]["group"] = comm_map[n]
@@ -234,7 +369,9 @@ for u, v, data in G.edges(data=True):
     data["width"] = w2width(data.get("weight", 1.0))
 
 
+
 # ----- Render with pyvis -----
+# Build pyvis network
 net = Network(height=args.height, width=args.width, directed=False, notebook=False)
 net.barnes_hut()  # default; can be overridden below
 

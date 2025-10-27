@@ -28,9 +28,9 @@ from kg_pipeline import (
     WeightedTupleMerger,
     TripletKnowledgeGraphBuilder,
     TripletGraphMerger,
-    DocumentChunker
+    DocumentChunker,
 )
-
+from kg_pipeline.provenance import compute_doc_id, DocContext
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract a simple knowledge graph from PDF(s).")
@@ -96,14 +96,18 @@ def main() -> None:
     elif args.ner == "ollama":
         ner = LLMNER(client="ollama", model="minstral", temperature=0.0)
 
+    interrupted = False
+
     for i, pdf_path in enumerate(pdf_paths, start=1):
         try:
-            print(f"[{i}/{len(pdf_paths)}] Reading PDF: {pdf_path} ...")
-            # Data acquisition
+            doc_id = compute_doc_id(pdf_path)
             da = DataAcquisition(pdf_path)
+            doc_meta = {"filename": Path(pdf_path).name}
+
+            print(f"[{i}/{len(pdf_paths)}] Reading PDF: {pdf_path} ...")
             text = da.read()
             print(f"    Extracted {len(text)} characters.")
-            # Optional chunking
+
             if args.chunking == "sections":
                 chunks = chunker.chunk_by_sections(text)
             elif args.chunking == "abstract_discussion":
@@ -111,43 +115,40 @@ def main() -> None:
             else:
                 chunks = chunker.no_chunk(text)
 
-            for j, text in enumerate(chunks, start=1):
-                print(f"    Processing chunk {j}/{len(chunks)} with {len(text)} characters.")
-                # Optional summary
-                if args.summary:
-                    digestor = DocumentDigestor(max_sentences=1)
-                    summary = digestor.digest(text)
-                    print("    Summary:")
-                    print("    " + "\n    ".join(summary.splitlines()))
+            for j, chunk_text in enumerate(chunks, start=1):
+                try:
+                    print(f"    Processing chunk {j}/{len(chunks)} with {len(chunk_text)} characters.")
+                    if args.summary:
+                        summary = DocumentDigestor(max_sentences=1).digest(chunk_text)
+                        print("    Summary:")
+                        print("    " + "\n    ".join(summary.splitlines()))
 
-                # Entity extraction (returns iterable of (sentence, set(entities)))
-                # When using the simple NER, call .extract(); for spaCy wrapper
-                # call .extract(..., mode="sentences") for compatibility.
-                # Extract entities grouped by sentence.  The simple heuristic
-                # extractor exposes an ``extract`` method returning
-                # ``List[Tuple[str, Set[str]]]``.  The spaCy wrapper accepts a
-                # ``mode`` parameter to request sentence‑level output.
-                if isinstance(ner, NERExtractor):
-                    sentence_entities = ner.extract(text)
-                else:
-                    # type: ignore[attr-defined] – SpacyNER has an ``extract`` method
-                    sentence_entities = ner.extract(text, mode="sentences")  # type: ignore
-                    #print(f"    [DEBUG] Extracted sentence entities: {sentence_entities}")
-                print(f"    Found {len(sentence_entities)} sentence(s) with entities.")
+                    if isinstance(ner, NERExtractor):
+                        sentence_entities = ner.extract(chunk_text)
+                    else:
+                        sentence_entities = ner.extract(chunk_text, mode="sentences")  # type: ignore[attr-defined]
 
-                # Accumulate into the global triplet builder
-                kg_builder.build_from_sentences(sentence_entities)  # type: ignore[arg-type]
+                    print(f"    Found {len(sentence_entities)} sentence(s) with entities.")
+                    ctx = DocContext(doc_id=doc_id, doc_meta=doc_meta, chunk_id=j-1, page_hint=None)
+                    kg_builder.build_from_sentences(sentence_entities, context=ctx, start_sentence_id=0)  # type: ignore[arg-type]
+
+                except KeyboardInterrupt:
+                    print("    [INFO] Interrupted by user. Saving progress.", file=sys.stderr)
+                    interrupted = True
+                    break  # break chunk loop
+
+            if interrupted:
+                break  # break file loop
 
         except Exception as e:
-            # Keep going even if one file fails
+            # Normal per-file errors (KeyboardInterrupt won’t be caught here)
             print(f"    [WARN] Skipping {pdf_path} due to error: {e}", file=sys.stderr)
             continue
 
-    # Build final graph dict from the global builder
+    # ---- Save whatever we have ----
     graph_dict = kg_builder.to_dict()
-    print(f"\nConstructed combined graph with {len(graph_dict['nodes'])} nodes and {len(graph_dict['triples'])} triples.")
+    print(f"\nConstructed combined graph with {len(graph_dict['nodes'])} nodes and {len(graph_dict.get('triples', []))} triples.")
 
-    # Merge if requested
     if merge_path and merge_path.exists():
         print(f"Merging combined graph with existing graph: {merge_path}")
         merger = TripletGraphMerger(base_graph=TripletGraphMerger.load_json(merge_path))
@@ -157,6 +158,9 @@ def main() -> None:
         final_graph = graph_dict
 
     # Save
+    if interrupted:
+        out_path = out_path.with_name(out_path.stem + "_partial" + out_path.suffix)
+        print(f"[INFO] Interrupted run; saving to {out_path}")
     TripletGraphMerger.save_json(final_graph, out_path)
     print(f"Graph saved to {out_path}")
 

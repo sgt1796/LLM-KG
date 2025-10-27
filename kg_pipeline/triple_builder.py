@@ -22,9 +22,9 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Set, Tuple
+from typing import Dict, Iterable, List, Set, Tuple, Any
 import re
-
+from kg_pipeline.provenance import DocContext, Evidence
 # -----------------------------------------------------------------------------
 # Canonical relation patterns and their synonyms
 #
@@ -191,11 +191,12 @@ class TripletKnowledgeGraphBuilder:
     with a relation label.  Weights count the number of times the same
     (subject, relation, object) triple was observed across sentences.
     """
-
     nodes: Set[str] = field(default_factory=set)
-    triples: Dict[Tuple[str, str, str], int] = field(
-        default_factory=lambda: defaultdict(int)
+    # triples[(h,r,t)] = {"weight": int, "sources": List[dict]}
+    triples: Dict[Tuple[str, str, str], Dict[str, Any]] = field(
+        default_factory=lambda: defaultdict(lambda: {"weight": 0, "sources": []})
     )
+    _seen_evidence: Set[Tuple] = field(default_factory=set)  # dedupe key store
 
     def _entity_positions(self, sentence: str, entities: Set[str]) -> List[Tuple[int, str]]:
         """Return a list of (start_index, entity) tuples sorted by position.
@@ -256,7 +257,8 @@ class TripletKnowledgeGraphBuilder:
         pos_list.sort(key=lambda x: x[0])
         return pos_list
 
-    def add_sentence(self, sentence: str, entities: Set[str]) -> None:
+    def add_sentence(self, sentence: str, entities: Set[str],
+                     *, context: DocContext | None = None, sentence_id: int = 0) -> None:
         """Update the internal graph with relational triples for a single sentence.
 
         This method records each entity as a node and then delegates to
@@ -279,7 +281,47 @@ class TripletKnowledgeGraphBuilder:
         # Extract meaningful triples from this sentence
         triples = self.extract_triplets(sentence, entities)
         for subj, relation, obj in triples:
-            self.triples[(subj, relation, obj)] += 1
+            key = (subj, relation, obj)
+            if context is None:
+                # legacy behavior: just count
+                self.triples[key]["weight"] += 1
+            else:
+                # attach one evidence row per triple occurrence (per sentence)
+                # best-effort char_span: cover both mentions bounding box
+                # (we don't have per-entity spans here; approximate from names)
+                s_idx = sentence.lower().find(subj.lower())
+                o_idx = sentence.lower().find(obj.lower())
+                if s_idx < 0 or o_idx < 0:
+                    char_span = (0, 0)
+                else:
+                    s_end = s_idx + len(subj)
+                    o_end = o_idx + len(obj)
+                    char_span = (min(s_idx, o_idx), max(s_end, o_end))
+
+                ev = Evidence(
+                    doc_id=context.doc_id,
+                    doc_meta=context.doc_meta,
+                    chunk_id=context.chunk_id,
+                    sentence_id=sentence_id,
+                    page=context.page_hint,
+                    char_span=char_span,
+                    evidence=sentence,
+                    confidence=1.0,
+                )
+                k = ev.dedupe_key()
+                if k not in self._seen_evidence:
+                    self._seen_evidence.add(k)
+                    self.triples[key]["sources"].append({
+                        "doc_id": ev.doc_id,
+                        "doc_meta": ev.doc_meta,
+                        "chunk_id": ev.chunk_id,
+                        "sentence_id": ev.sentence_id,
+                        "page": ev.page,
+                        "char_span": list(ev.char_span),
+                        "evidence": ev.evidence,
+                        "confidence": ev.confidence,
+                    })
+                    self.triples[key]["weight"] += 1
 
     def extract_triplets(self, sentence: str, entities: Set[str]) -> List[Tuple[str, str, str]]:
         """Return a list of relational triples present in a sentence.
@@ -403,11 +445,43 @@ class TripletKnowledgeGraphBuilder:
                 result.append((subj, relation, obj))
         return result
 
-    def build_from_sentences(self, sentence_entities: Iterable[Tuple[str, Set[str]]]) -> None:
-        """Populate the graph from an iterable of (sentence, entities) tuples."""
+    def build_from_sentences(
+        self,
+        sentence_entities: Iterable[Tuple[str, Set[str]]],
+        *,
+        context: DocContext | None = None,
+        start_sentence_id: int = 0,
+    ) -> None:
+        """Populate the graph from an iterable of (sentence, entities) tuples.
+
+        If ``context`` is provided, evidence rows are attached per sentence,
+        and triple weights reflect unique evidence occurrences (deduped).
+        """
+        sid = start_sentence_id
         for sent, ents in sentence_entities:
             if ents:
-                self.add_sentence(sent, ents)
+                self.add_sentence(sent, ents, context=context, sentence_id=sid)
+            sid += 1
+
+    def to_dict(self) -> Dict[str, List[Dict[str, object]]]:
+        """Convert the graph to a JSON-serialisable dictionary.
+
+        Each triple includes its total weight and a list of supporting
+        evidence records (sources).  This keeps full provenance traceable.
+        """
+        nodes_list = sorted(self.nodes)
+        triples_list: List[Dict[str, object]] = []
+
+        for (subj, rel, obj), data in sorted(self.triples.items()):
+            triples_list.append({
+                "subject": subj,
+                "relation": rel,
+                "object": obj,
+                "weight": data.get("weight", 0),
+                "sources": data.get("sources", []),   # <-- provenance evidence
+            })
+
+        return {"nodes": nodes_list, "triples": triples_list}
 
     def to_dict(self) -> Dict[str, List[Dict[str, object]]]:
         """Convert the graph to a JSON‑serialisable dictionary.
@@ -419,8 +493,13 @@ class TripletKnowledgeGraphBuilder:
           ``subject``, ``relation``, ``object`` and ``weight``.
         """
         nodes_list = sorted(self.nodes)
-        triples_list = [
-            {"subject": subj, "relation": rel, "object": obj, "weight": w}
-            for (subj, rel, obj), w in sorted(self.triples.items())
-        ]
+        triples_list = []
+        for (subj, rel, obj), data in sorted(self.triples.items()):
+            triples_list.append({
+                "subject": subj,
+                "relation": rel,
+                "object": obj,
+                "weight": data.get("weight", 0),
+                "sources": data.get("sources", []),  # <- provenance in JSON
+            })
         return {"nodes": nodes_list, "triples": triples_list}

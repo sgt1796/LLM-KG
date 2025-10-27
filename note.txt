@@ -15,3 +15,22 @@ II. SUD KG building
 python KG_visualizer.py --k-core 3 --max-nodes 300 --label-top 10 --highlight-edges-top 20 --edge-labels-top 10 --min-weight 50 --input graph_clean.json --layout spring --largest-only
 python pyvis_view.py --input graph_clean_ADHD_SUD.json --html graph_viz.html --min-weight 30 --k-core 3 --max-nodes 300 --label-top 10
 python pyvis_view.py --input graph_clean_ADHD_SUD.json --html graph_viz.html --weight "3-58" --k-core 2 --max-nodes 500 --max-edges 400 --label-top 20 --physics barnesHut
+
+
+
+
+Data set test:
+1. python fetch_ncbi.py --csv dataset1-ADHDMeSHTe-set.csv --out papers_dataset1 --resume
+2. python main.py --pdf papers_dataset1 --output graph_dataset1_llm.json --ner openai --chunking abstract_discussion
+3. python pyvis_view.py --input graph_dataset1_llm.json --html graph_dataset1_llm.html --weight ">=0" --k-core 0 --max-nodes 500 --max-edges 600 --label-top 20 --physics barnesHut
+
+
+datasets:
+1. ADHD[MeSH Terms] AND dopamine[MeSH Terms] AND methylphenidate[Title/Abstract]
+2. microbiota[MeSH Terms] AND "tryptophan"[MeSH Terms] AND serotonin[MeSH Terms]
+3. Alzheimer Disease[MeSH Terms] AND microglia[Title/Abstract] AND (transcriptom*[Title/Abstract] OR "single-cell"[Title/Abstract] OR snRNA-seq[Title/Abstract])
+
+
+TODO:
+1. merge node by ontology
+2. use directional edge
