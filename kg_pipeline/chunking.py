@@ -1,5 +1,4 @@
-"""Placeholder for document chunking.
-
+"""
 In a complete system long documents should be split into smaller
 overlapping chunks before being embedded or processed by an LLM.
 This module defines a simple interface and a trivial implementation
@@ -23,6 +22,27 @@ class DocumentChunker:
     def no_chunk(self, text: str) -> List[str]:
         """Return the entire document as one chunk."""
         return [text]
+
+    def chunk_by_fixed_size(self, text: str, size: int = -1) -> List[str]:
+        """Chunk the document into fixed-size overlapping chunks."""
+        words = text.split()
+        chunks = []
+        if size == -1:
+            size = self.max_tokens
+        start = 0
+        while start < len(words):
+            end = min(start + size, len(words))
+            chunk = " ".join(words[start:end])
+            chunks.append(chunk)
+            if end == len(words):
+                break
+            start = end - self.overlap  # overlap for next chunk
+        return chunks
+
+    def chunk_by_pages(self, text: str) -> List[str]:
+        """Chunking a document by pages based on form feed characters."""
+        pages = text.split("\f")
+        return [page.strip() for page in pages if page.strip()]
 
     def chunk_by_sections(self, text: str) -> List[str]:
         """Chunking a journal article by sections."""

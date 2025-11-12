@@ -22,20 +22,12 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Set, Tuple, Any
+from typing import Dict, Iterable, List, Set, Tuple, Any, Optional
 import re
 from kg_pipeline.provenance import DocContext, Evidence
 from kg_pipeline.label_store import LabelStore
 
-# -----------------------------------------------------------------------------
-# Canonical relation patterns and their synonyms
-#
-# These mappings expand on the original heuristic for relation extraction by
-# recognising common biomedical phrasing and rewriting them to a small set of
-# canonical predicates.  Patterns are declared at module scope so they can be
-# reused by both the relation extractor and the graph builder when checking
-# relative positions of verbs.
-
+# --- Canonical relation map (now general-domain) ---
 _CANON_SYNONYMS: Dict[str, List[str]] = {
     "associated with": [
         "is associated with", "associated with", "associated to", "linked to", "linked with",
@@ -44,162 +36,150 @@ _CANON_SYNONYMS: Dict[str, List[str]] = {
     "causes": [
         "leads to", "results in", "cause of", "causes", "lead to", "result in",
         "affects", "affect", "induces", "induce", "triggers", "trigger", "triggered",
-        "increase risk of", "increase risk for", "raises risk of", "raises risk for"
-        , "increases the risk of", "increases the risk for", "increases risk of", "increases risk for",
+        "increase risk of", "increase risk for", "raises risk of", "raises risk for",
+        "increases the risk of", "increases the risk for", "increases risk of", "increases risk for",
         "increase the risk of", "increase the risk for"
     ],
+
+    # --- General-domain additions ---
+    "part_of": [
+        "part of", "component of", "member of", "subset of", "belongs to", "included in"
+    ],
+    "located_in": [
+        "located in", "based in", "headquartered in", "situated in"
+    ],
+    "owns": [
+        "owns", "owner of", "acquires", "acquired", "purchases", "purchased", "bought", "buy", "buys"
+    ],
+    "produces": [
+        "produces", "produce", "manufactures", "manufacture", "builds", "build",
+        "creates", "create", "makes", "make", "develops", "develop"
+    ],
+    "uses": [
+        "uses", "use", "utilizes", "utilize", "employs", "employ", "adopts", "adopt",
+        "leverages", "leverage"
+    ],
+    "provides": [
+        "provides", "provide", "offers", "offer", "supplies", "supply", "delivers", "deliver"
+    ],
+    "supports": [
+        "supports", "support", "compatible with", "works with", "integrates with",
+        "integrates", "integration with"
+    ],
+    "publishes": [
+        "publishes", "publish", "releases", "release", "launched", "launches", "launch",
+        "announces", "announce", "announced"
+    ],
+    "authored_by": [
+        "authored by", "written by", "by"
+    ],
+    "founded_by": [
+        "founded by", "established by"
+    ],
+    "founded": [
+        "founded", "established", "set up"
+    ],
+    "partners_with": [
+        "partners with", "in partnership with", "collaborates with", "collaborate with",
+        "collaborates", "collaborate"
+    ],
+    "competes_with": [
+        "competes with", "rivals", "vs", "versus"
+    ],
+
     "risk for": [
         "risk for", "risk of", "risk factor for", "risk factors for"
     ],
     "interacts with": [
         "interacts with", "interact with", "interacts"
     ],
-    "binds": [
-        "binds to", "binds with", "binds", "bind to", "bind with", "bind", "binds onto"
-    ],
-    "regulates": [
-        "regulates", "regulate", "controls", "control", "modulates", "modulate"
-    ],
-    "inhibits": [
-        "inhibits", "inhibit", "suppresses", "suppress", "downregulates", "downregulate"
-    ],
-    "activates": [
-        "activates", "activate", "stimulates", "stimulate", "upregulates", "upregulate"
-    ],
-    "increases": [
-        "increases", "increase", "enhances", "enhance", "raises", "raise"
-    ],
-    "decreases": [
-        "decreases", "decrease", "reduces", "reduce", "lowers", "lower"
-    ],
-    "treats": [
-        "treats", "treat", "therapy for", "remedy for", "cures", "cure"
-    ],
-    "prevents": [
-        "prevents", "prevent", "avoids", "avoid", "protects against", "protect against"
-    ],
-    "predicts": [
-        "predicts", "predict"
-    ],
-    "correlates with": [
-        "correlates with", "correlate with", "correlates", "correlate"
-    ],
-    "promotes": [
-        "promotes", "promote", "facilitates", "facilitate"
-    ],
-    "suppresses": [
-        "suppresses", "suppress", "down-regulates", "down-regulate"
-    ],
-    "mediates": [
-        "mediates", "mediate"
-    ],
-    "expresses": [
-        "expresses", "express"
-    ],
-    "encodes": [
-        "encodes", "encode"
-    ],
 }
 
-# Flatten the synonym mapping into a list of (synonym, canonical) pairs sorted
-# by descending length to prefer longer multi‑word matches.  This is recomputed
-# after the canonical mapping is defined so that any updates to
-# ``_CANON_SYNONYMS`` are reflected in the flattened list.
-_SYNONYM_PAIRS: List[Tuple[str, str]] = []
-for _canon, _syns in _CANON_SYNONYMS.items():
-    for _syn in _syns:
-        _SYNONYM_PAIRS.append((_syn, _canon))
-_SYNONYM_PAIRS.sort(key=lambda x: len(x[0]), reverse=True)
+def _flatten_synonyms(canon_map: Dict[str, List[str]]) -> Tuple[List[Tuple[str, str]], List[str]]:
+    """Create (synonym -> canonical) pairs and a verbish fallback list from a map."""
+    pairs: List[Tuple[str, str]] = []
+    for _canon, _syns in canon_map.items():
+        for _syn in _syns:
+            pairs.append((_syn, _canon))
+    pairs.sort(key=lambda x: len(x[0]), reverse=True)  # prefer longer matches
+    return pairs, list(canon_map.keys())
 
-# A simple list of canonical relation labels; used as a secondary fall‑back
-_VERBISH: List[str] = list(_CANON_SYNONYMS.keys())
+_SYNONYM_PAIRS, _VERBISH = _flatten_synonyms(_CANON_SYNONYMS)
 
 
-def _extract_relation(span: str, sentence: str = "", left_ctx: str = "", right_ctx: str = "") -> str:
-    """Extract a canonical relation phrase from the text between two entities.
+def _extract_relation(
+    span: str,
+    sentence: str = "",
+    left_ctx: str = "",
+    right_ctx: str = "",
+    *,
+    synonym_pairs: Optional[List[Tuple[str, str]]] = None,
+    verbish: Optional[List[str]] = None,
+) -> str:
+    """Return a canonical relation label if a synonym is detected, else '' to skip."""
+    low = span.lower().strip()
+    pairs = synonym_pairs if synonym_pairs is not None else _SYNONYM_PAIRS
+    verbs = verbish if verbish is not None else _VERBISH
 
-    This helper uses a multi‑stage heuristic to identify meaningful
-    predicates that link two entity mentions.  It first normalises and
-    searches the span for known relation patterns (verbs and short
-    phrases).  If none are found in the span, it will fall back to
-    scanning the immediate left and right context of the span.  If no
-    useful relation can be identified the function returns either
-    ``"related_to"`` or a special ``"__SKIP__`` token to indicate that
-    the pair should be skipped entirely.
-
-    Parameters
-    ----------
-    span : str
-        The substring of the original sentence between two entity
-        mentions.  This is lower‑cased and stripped of leading/trailing
-        whitespace for matching.
-    sentence : str, optional
-        The full sentence containing the entities.  Used when
-        falling back to context scanning.
-    left_ctx : str, optional
-        Up to 20 characters of context immediately preceding the span.
-    right_ctx : str, optional
-        Up to 20 characters of context immediately following the span.
-
-    Returns
-    -------
-    str
-        A canonical relation phrase or special token.  Returning
-        ``"__SKIP__"`` indicates that the span contains only junk words
-        and no triple should be recorded.  Returning ``"related_to"``
-        provides a generic edge when no specific relation is detected.
-    """
-
-    # Normalise the span: collapse whitespace and lowercase it
-    cleaned = span.strip() if span else ""
-    low = cleaned.lower()
-
-    # If the span is empty or extremely long, treat it as uninformative
-    if not low or len(low) > 50:
-        low = ""
-
-    # A minimal stopword set used to flag spans consisting solely of junk
-    JUNK = {"and", "of", "with", "in", "for", "the", "between", "to", "by", "on", "from", "at", "as"}
-
-    # If the span itself consists solely of junk words, skip this pair entirely
-    if low and all(tok in JUNK for tok in low.split()):
-        return "__SKIP__"
-
-    # Attempt to find a known relation phrase directly in the span
+    # direct hit inside the span
     if low:
-        for syn, canon in _SYNONYM_PAIRS:
+        for syn, canon in pairs:
             if syn in low:
                 return canon
 
-    # If nothing matched in the span, also search in the immediate context
-    ctx = f"{left_ctx.lower()} {low} {right_ctx.lower()}"
-    for syn, canon in _SYNONYM_PAIRS:
-        if syn in ctx:
-            return canon
+    # soft context fallback (left/right window)
+    ctx = f"{left_ctx} {right_ctx}".lower()
+    if ctx:
+        for syn, canon in pairs:
+            if syn in ctx:
+                return canon
+        for v in verbs:
+            if v in ctx:
+                return v
 
-    # As a final heuristic, look for any of the canonical relations in the context
-    for v in _VERBISH:
-        if v in ctx:
-            return v
+    return ""  # __SKIP__
 
-    # If no relation found, return the generic relation
-    return "related_to"
 
 @dataclass
 class TripletKnowledgeGraphBuilder:
-    """Builds a simple knowledge graph of subject–relation–object triples.
-
-    Nodes are entity strings and triples connect a subject to an object
-    with a relation label.  Weights count the number of times the same
-    (subject, relation, object) triple was observed across sentences.
-    """
     nodes: Set[str] = field(default_factory=set)
-    # triples[(h,r,t)] = {"weight": int, "sources": List[dict]}
-    triples: Dict[Tuple[str, str, str], Dict[str, Any]] = field(
-        default_factory=lambda: defaultdict(lambda: {"weight": 0, "sources": []})
-    )
-    _seen_evidence: Set[Tuple] = field(default_factory=set)  # dedupe key 
+    triples: Dict[Tuple[str, str, str], Dict[str, Any]] = field(default_factory=lambda: defaultdict(lambda: {"weight": 0, "sources": []}))
+    _seen_evidence: Set[Tuple] = field(default_factory=set)  # dedupe key store
+
     label_store: LabelStore | None = None  # NEW: optional shared store for dynamic labels
+
+    # --- configuration knobs for general pipeline ---
+    allow_generic_related: bool = False
+    canonical_map_override: Optional[Dict[str, List[str]]] = None
+    _syn_pairs: List[Tuple[str, str]] = field(init=False, default_factory=list)
+    _verbish: List[str] = field(init=False, default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Compile synonym pairs/verbish list (allowing per-instance override)."""
+        if self.canonical_map_override:
+            self._syn_pairs, self._verbish = _flatten_synonyms(self.canonical_map_override)
+        else:
+            self._syn_pairs, self._verbish = _SYNONYM_PAIRS, _VERBISH
+    def _commit_label(self, rel: str) -> str:
+        """
+        If a store is present, fold the relation spelling into the store and
+        return the canonical label to use downstream. Otherwise return as-is.
+        """
+        if not rel:
+            return ""
+        if self.label_store is None:
+            return rel
+
+
+        canon = self.label_store.observe(rel)
+
+        return canon if self.label_store.should_emit(canon) else rel
+    
+    def set_relation_catalog(self, canon_map: Dict[str, List[str]]) -> None:
+        """Dynamically replace the relation catalog."""
+        self.canonical_map_override = canon_map
+        self._syn_pairs, self._verbish = _flatten_synonyms(canon_map)
+
 
     def _entity_positions(self, sentence: str, entities: Set[str]) -> List[Tuple[int, str]]:
         """Return a list of (start_index, entity) tuples sorted by position.
@@ -260,20 +240,6 @@ class TripletKnowledgeGraphBuilder:
         pos_list.sort(key=lambda x: x[0])
         return pos_list
 
-    def _canonicalise_relation(self, relation: str) -> str | None:
-        """Map a detected relation into a persisted canonical label using LabelStore."""
-        if not relation or relation == "__SKIP__":
-            return None
-        if self.label_store is None:
-            return relation
-
-        canon = self.label_store.observe(relation)
-        if canon and self.label_store.should_emit(canon):
-            return canon
-
-        # If not yet promoted (too rare / noisy), skip emitting to avoid label blow-up.
-        return None
-
     def add_sentence(self, sentence: str, entities: Set[str],
                      *, context: DocContext | None = None, sentence_id: int = 0) -> None:
         """Update the internal graph with relational triples for a single sentence.
@@ -298,9 +264,6 @@ class TripletKnowledgeGraphBuilder:
         # Extract meaningful triples from this sentence
         triples = self.extract_triplets(sentence, entities)
         for subj, relation, obj in triples:
-            relation = self._canonicalise_relation(relation)
-            if not relation:
-                continue
             key = (subj, relation, obj)
             if context is None:
                 # legacy behavior: just count
@@ -390,10 +353,15 @@ class TripletKnowledgeGraphBuilder:
                 # relation extraction when the span is empty or too long
                 left_ctx = sentence[max(0, start - 20):start]
                 right_ctx = sentence[end:min(len(sentence), end + 20)]
-                relation = _extract_relation(span, sentence, left_ctx, right_ctx)
+                relation = _extract_relation(
+                    span, sentence, left_ctx, right_ctx,
+                    synonym_pairs=self._syn_pairs, verbish=self._verbish
+                )
                 # Skip spans that produce no informative relation
                 if relation in ("__SKIP__",""): # for now reserve  "related_to"
                     continue
+                
+                relation = self._commit_label(relation)
                 # Ensure that the canonical relation occurs within the span itself.
                 # If it was only detected via context, disregard this pair.
                 span_lower = span.lower()
@@ -461,13 +429,7 @@ class TripletKnowledgeGraphBuilder:
                     # Build a set of lowercased entity names for quick lookup
                     entity_tokens = {e.lower() for _, e in pos_entities}
                     if any((w not in allowed_conj) and (w not in entity_tokens) for w in words):
-                       continue
-
-                # Final dynamic canonicalisation / gating
-                relation = self._canonicalise_relation(relation)
-                if not relation:
-                   continue
-
+                        continue
                 result.append((subj, relation, obj))
         return result
 
@@ -488,6 +450,26 @@ class TripletKnowledgeGraphBuilder:
             if ents:
                 self.add_sentence(sent, ents, context=context, sentence_id=sid)
             sid += 1
+
+    def to_dict(self) -> Dict[str, List[Dict[str, object]]]:
+        """Convert the graph to a JSON-serialisable dictionary.
+
+        Each triple includes its total weight and a list of supporting
+        evidence records (sources).  This keeps full provenance traceable.
+        """
+        nodes_list = sorted(self.nodes)
+        triples_list: List[Dict[str, object]] = []
+
+        for (subj, rel, obj), data in sorted(self.triples.items()):
+            triples_list.append({
+                "subject": subj,
+                "relation": rel,
+                "object": obj,
+                "weight": data.get("weight", 0),
+                "sources": data.get("sources", []),   # <-- provenance evidence
+            })
+
+        return {"nodes": nodes_list, "triples": triples_list}
 
     def to_dict(self) -> Dict[str, List[Dict[str, object]]]:
         """Convert the graph to a JSON‑serialisable dictionary.

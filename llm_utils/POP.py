@@ -44,7 +44,6 @@ class PromptFunction:
             client (LLMClient | str): An instance of an LLM client or a string identifier. Defaults to OpenAIClient. ("openai", "gemini", "local", "deepseek")
         """
         self.prompt = prompt
-        self.temperature = 0.7
         self.sys_prompt = sys_prompt
         self.placeholders = self._get_place_holder()
         self.client = None
@@ -55,6 +54,9 @@ class PromptFunction:
             self.client = client_map.get(client, None)
             if self.client:
                 self.client = self.client() # instantiate LLMClient if user passed a string
+
+        # gpt-5/mini/nano only supports temperature 1
+        self.temperature = 1 if self.client.__class__.__name__ == "OpenAIClient" and default_model[self.client.__class__.__name__] in ["gpt-5-nano", "gpt-5-mini", "gpt-5"] else 0.0
         self.last_response = None
         self.default_model_name = default_model[self.client.__class__.__name__]
         print(f"[PromptFunction] Using client: {self.client.__class__.__name__}, default model: {self.default_model_name}")
@@ -298,8 +300,8 @@ class PromptFunction:
 
         completion = self.client.chat_completion(
             model=model,
-            temperature=0.02,
             response_format=meta_schema,
+            temperature=self.temperature,
             messages=[
                 {
                     "role": "system",
@@ -316,12 +318,12 @@ class PromptFunction:
         # store to disk if requested
         if save:
             import os
-            os.makedirs("functions", exist_ok=True)
+            os.makedirs("schemas", exist_ok=True)
             
-            function_name = parsed_schema["name"]
-            safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", function_name)
-            file_path = os.path.join("functions", f"{safe_name}.json")
-            
+            prompts_name = parsed_schema["name"] if "name" in parsed_schema else "generated_schema"
+            safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", prompts_name)
+            file_path = os.path.join("schemas", f"{safe_name}.json")
+
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(parsed_schema, f, indent=2)
             print(f"[generate_schema] Function schema saved to {file_path}")
@@ -377,7 +379,7 @@ class PromptFunction:
         completion = self.client.chat_completion(
             messages=messages,
             model=model,
-            temperature=0.1
+            temperature=self.temperature
         )
         
         code = completion.choices[0].message.content

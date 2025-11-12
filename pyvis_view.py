@@ -240,8 +240,8 @@ def _fmt_one_source(s) -> str:
         ev = " ".join(ev.split())
 
         lines = []
-        if fn:   lines.append(f"[file]: {_clip(fn)}")
-        if did:  lines.append(f"[doc_id]: {_clip(did)}")
+        if fn:   lines.append(f"> [file]: {_clip(fn)}")
+        if did:  lines.append(f"> [doc_id]: {_clip(did)}")
         if sid is not None:  lines.append(f"[sentence_id]: {_clip(sid)}")
         if span is not None: lines.append(f"[char_span]: {_clip(span)}")
         if conf is not None: lines.append(f"[confidence]: {_clip(conf)}")
@@ -285,13 +285,13 @@ def _fmt_sources(sources, limit=5) -> str:
 
     lines = []
     for (did, fn), group in list(grouped.items())[:limit]:
-        lines.append(f"[doc_id]: {did}  \n[file]: {fn}")
+        lines.append(f"> [doc_id]: {did}  \n> [file]: {fn}")
         for g in group:
             ev = g.get("evidence") or ""
             if ev:
                 ev = " ".join(ev.split())
                 ev = ev[:97] + "..." if len(ev) > 100 else ev
-                lines.append(f"> [evidence]: {ev}")
+                lines.append(f"[evidence]: {ev}")
 
     return "\n".join(lines)
 

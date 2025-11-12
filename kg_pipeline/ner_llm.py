@@ -10,19 +10,22 @@ Use when you want deterministic JSON from the model.
 
 from __future__ import annotations
 from typing import List, Set, Tuple, Dict, Any, Optional
+from pathlib import Path
 import re
 import sys
 import json
 from llm_utils.POP import PromptFunction
+from kg_pipeline.label_store import LabelStore
 
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9])")
+LABELS_PATH = Path(".kg_cache/labels.json")
 DEFAULT_LABELS = [
-    "DISEASE","DISORDER","SYMPTOM",
-    "DRUG","CHEMICAL",
-    "GENE","PROTEIN","BIO_PROCESS",
-    "MEASUREMENT","VALUE",
-    "PERSON","ORG","LOCATION",
-    "OTHER"
+    # "DISEASE","DISORDER","SYMPTOM",
+    # "DRUG","CHEMICAL",
+    # "GENE","PROTEIN","BIO_PROCESS",
+    # "MEASUREMENT","VALUE",
+    # "PERSON","ORG","LOCATION",
+    # "OTHER"
 ]
 
 SYSTEM_PROMPT = """You are a biomedical NER extractor.
@@ -101,19 +104,21 @@ class LLMNER:
         client: str = "openai",
         model: Optional[str] = None,
         temperature: float = 0.0,
-        max_sent_len: int = 1500
+        max_sent_len: int = 1500,
+        label_store: Optional[LabelStore] = None
     ) -> None:
-        # Your POP PromptFunction; we’ll pass response_format for schema
         self.fn = PromptFunction(sys_prompt=SYSTEM_PROMPT, prompt=USER_PROMPT, client=client)
         self.model = model  # if None, POP will use its default for that client
         self.temperature = temperature
         self.max_sent_len = max_sent_len
+        self.label_store = label_store if label_store else LabelStore(LABELS_PATH, max_labels=384, min_promote=2, sim_threshold=0.86)
 
     def _call(self, text_block: str) -> Dict[str, Any]:
         # IMPORTANT: pass OpenAI-style structured output knobs through POP.
         # Your POP should forward these as response_format to OpenAI.
         raw = self.fn.execute(
             text=text_block,
+            labels=self.label_store,  # LabelStore class has _str__ attributes
             temp=self.temperature,
             fmt=NER_SCHEMA
         )
@@ -121,7 +126,7 @@ class LLMNER:
             return json.loads(raw)
         except Exception:
             return raw
-    
+
     def extract(self, text: str, mode="flat") -> List[Tuple[str, Set[str]]]:
         """Return pipeline-compatible: [(sentence, {entities...}), ...]
         

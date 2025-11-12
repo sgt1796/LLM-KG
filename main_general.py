@@ -24,16 +24,56 @@ from kg_pipeline import (
     NERExtractor,
     SpacyNER,
     LLMNER,
-    TripletKnowledgeGraphBuilder,
+    GeneralTripletKnowledgeGraphBuilder,
     TripletGraphMerger,
     DocumentChunker,
     LabelStore
 )
 from kg_pipeline.provenance import compute_doc_id, DocContext
-
+DEFAULT_LABELS = [
+    # "PERSON","ORG","LOCATION","GPE","FACILITY",
+    # "EVENT","WORK_OF_ART","LAW","LANGUAGE",
+    # "PRODUCT","SOFTWARE","DATASET","TECHNOLOGY","SCIENTIFIC_TERM","METHOD",
+    # "CONCEPT","TOPIC","FIELD",
+    # "MEASURE","QUANTITY","PERCENT","MONEY","VALUE","DATE","TIME","DURATION",
+    # "DOCUMENT","URL","ID",
+    # "OTHER"
+]
 LABELS_PATH = Path("kg_pipeline/.kg_cache/labels.json")
-DEFAULT_LABELS = []
+SYSTEM_PROMPT = """You are a general-domain NER extractor for knowledge-graph building.
+Return ONLY JSON matching the schema exactly.
+Identify named entities that would plausibly form KG nodes across domains (people, orgs, places, events, products, works, laws, technologies, methods, datasets, scientific terms, measures/values, dates/times, concepts).
+Rules:
+- De-duplicate entities within each sentence; preserve original surface forms (no stemming/lemmatization).
+- Exclude stop words, single letters, and pure punctuation.
+- Keep compact spans (avoid trailing spaces, quotes, brackets).
+- Prefer canonical named forms over pronouns (e.g., “OpenAI” not “it”).
+- Numbers are only entities if meaningful (e.g., “$2.3M”, “42%”, “ISO 27001”, “2023”, “1.2 km”).
+- Do not infer facts not present in the text.
+- If a sentence has no valid entities, return an empty list for that sentence.
+"""
 
+USER_PROMPT = """Extract entities for EACH sentence provided.
+
+Use only these labels:
+<<<labels>>>
+
+Return JSON exactly in this form:
+{
+  "sentences": [
+    { "text": "<original sentence>",
+      "entities": [
+        { "text": "<surface form>", "label": "<ONE_OF_LABELS_ABOVE>" },
+        ...
+      ]
+    },
+    ...
+  ]
+}
+
+TEXT:
+<<<text>>>
+"""
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract a simple knowledge graph from PDF(s).")
     parser.add_argument("--pdf", type=str, required=True,
@@ -49,7 +89,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
                         "--chunking",
                         type=str,
-                        choices=["none", "sections", "abstract_discussion"],
+                        choices=["none", "sections", "abstract_discussion", "fixed_size", "pages"],
                         default="none",
                         help="Document chunking method to use before NER."
                     )
@@ -90,8 +130,12 @@ def main() -> None:
             store.labels[lab] = {"count": 1, "first": 0, "last": 0}
         store.save()
 
+    # 2) initialize the builder with the store
     # One global triplet builder to accumulate triples across ALL PDFs
-    kg_builder = TripletKnowledgeGraphBuilder(label_store=store)
+    kg_builder = GeneralTripletKnowledgeGraphBuilder(
+        allow_generic_related=True,
+        canonical_map_override=None,
+        label_store=store,)
 
     chunker = DocumentChunker()
 
@@ -106,8 +150,14 @@ def main() -> None:
         ner = SpacyNER()
     elif args.ner == "openai":
         ner = LLMNER(client="openai", model="gpt-5-nano", temperature=1) # gpt 5 doesn't support temperature 0
+        # Override prompts to fit general domain
+        ner.system_prompt = SYSTEM_PROMPT
+        ner.user_prompt = USER_PROMPT
     elif args.ner == "ollama":
+        # Override prompts to fit general domain
         ner = LLMNER(client="ollama", model="minstral", temperature=0.0)
+        ner.system_prompt = SYSTEM_PROMPT
+        ner.user_prompt = USER_PROMPT
 
     interrupted = False
 
@@ -125,6 +175,10 @@ def main() -> None:
                 chunks = chunker.chunk_by_sections(text)
             elif args.chunking == "abstract_discussion":
                 chunks = chunker.chunk_abstract_discussion(text)
+            elif args.chunking == "fixed_size":
+                chunks = chunker.chunk_by_fixed_size(text, size=500)
+            elif args.chunking == "pages":
+                chunks = chunker.chunk_by_pages(text)
             else:
                 chunks = chunker.no_chunk(text)
 
@@ -170,12 +224,12 @@ def main() -> None:
     else:
         final_graph = graph_dict
 
+
+    print(f"\nLabels: {store.labels}")
     # Save
     if interrupted:
         out_path = out_path.with_name(out_path.stem + "_partial" + out_path.suffix)
         print(f"[INFO] Interrupted run; saving to {out_path}")
-
-    print(f"\nLabels: {store.labels}")
     TripletGraphMerger.save_json(final_graph, out_path)
     print(f"Graph saved to {out_path}")
 

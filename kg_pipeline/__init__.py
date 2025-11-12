@@ -17,10 +17,13 @@ from .tuple_merger import WeightedTupleMerger    # noqa: F401
 
 # Triplet‑based builder and merger for subject–relation–object graphs
 from .triple_builder import TripletKnowledgeGraphBuilder  # noqa: F401
+from .triple_builder_general import TripletKnowledgeGraphBuilder as GeneralTripletKnowledgeGraphBuilder  # noqa: F401
 from .triple_merger import TripletGraphMerger            # noqa: F401
 
 # source tracking
 from .provenance import DocMeta, DocContext, Evidence, compute_doc_id  # noqa: F401
+# dynamic label store
+from .label_store import LabelStore  # noqa: F401
 
 __all__ = [
     "DataAcquisition",
@@ -31,10 +34,12 @@ __all__ = [
     "WeightedTupleBuilder",
     "WeightedTupleMerger",
     "TripletKnowledgeGraphBuilder",
+    "GeneralTripletKnowledgeGraphBuilder",
     "TripletGraphMerger",
     "DocumentChunker",
     "DocMeta",
     "DocContext",
     "Evidence",
     "compute_doc_id",
+    "LabelStore",
 ]
