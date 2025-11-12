@@ -1,0 +1,6 @@
+{
+  "labels": {},
+  "max_labels": 384,
+  "min_promote": 2,
+  "sim_threshold": 0.86
+}
