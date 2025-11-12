@@ -32,5 +32,10 @@ datasets:
 
 
 TODO:
-1. merge node by ontology
+1. merge node by ontology (relation_mapper.py)
 2. use directional edge
+
+[11.11] Dynamic labeling test on dataset 1 & 3
+python main.py --pdf "papers_dataset1" --output ADHD.json --ner openai --chunking abstract_discussion
+python main.py --pdf "papers_dataset3" --output ADHD_AD.json --ner openai --chunking abstract_discussion --merge ADHD.json 
+python pyvis_view.py --input ADHD_AD.json --html ADHD_AD.html --weight ">=0" --k-core 0 --max-nodes 500 --max-edges 600 --label-top 20 --physics barnesHut    
