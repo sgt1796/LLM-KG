@@ -6,6 +6,8 @@ from statistics import median
 import numpy as np
 import networkx as nx
 from pyvis.network import Network
+import re
+
 
 # ---------- CLI ----------
 ap = argparse.ArgumentParser(description="Interactive KG viewer (pyvis)")
@@ -22,6 +24,9 @@ ap.add_argument("--physics", choices=["barnesHut","forceAtlas2Based","repulsion"
                 default="barnesHut", help="pyvis physics solver")
 ap.add_argument("--height", default="1000px")
 ap.add_argument("--width", default="100%")
+ap.add_argument("--directed", action="store_true", help="Render as directed graph")
+ap.add_argument("--select-menu", action="store_true", help="Enable pyvis select menu")
+ap.add_argument("--filter-menu", action="store_true", help="Enable pyvis filter menu")
 args = ap.parse_args()
 
 # ---------- Loader (supports nodes/edges, triples, JSONL) ----------
@@ -146,7 +151,6 @@ for n in nodes:
         G.add_node(str(n))
 
 # Replace min-weight and max-weight with a single weight parameter
-import re
 weight_arg = args.weight.strip()
 range_match = re.match(r"^(\d+(\.\d+)?)-(\d+(\.\d+)?)$", weight_arg)
 
@@ -372,7 +376,7 @@ for u, v, data in G.edges(data=True):
 
 # ----- Render with pyvis -----
 # Build pyvis network
-net = Network(height=args.height, width=args.width, directed=False, notebook=False)
+net = Network(height=args.height, width=args.width, notebook=False, directed=args.directed, select_menu=args.select_menu, filter_menu=args.filter_menu)
 net.barnes_hut()  # default; can be overridden below
 
 if args.physics == "false":

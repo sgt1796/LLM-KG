@@ -22,8 +22,7 @@ python pyvis_view.py --input graph_clean_ADHD_SUD.json --html graph_viz.html --w
 Data set test:
 1. python fetch_ncbi.py --csv dataset1-ADHDMeSHTe-set.csv --out papers_dataset1 --resume
 2. python main.py --pdf papers_dataset1 --output graph_dataset1_llm.json --ner openai --chunking abstract_discussion
-3. python pyvis_view.py --input graph_dataset1_llm.json --html graph_dataset1_llm.html --weight ">=0" --k-core 0 --max-nodes 500 --max-edges 600 --label-top 20 --physics barnesHut
-
+python pyvis_view.py --input graph_dataset1_llm.json --html graph_dataset1_llm.html --weight “>=0" --k-core 0 --max-nodes 500 --max-edges 600 --label-top 20 --physics barnesHut --largest-only --directed --filter-menu      
 
 datasets:
 1. ADHD[MeSH Terms] AND dopamine[MeSH Terms] AND methylphenidate[Title/Abstract]

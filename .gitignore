@@ -185,3 +185,7 @@ sampled_papers/
 ADHD_graph_raw.json
 misc/
 papers/
+.vscode/
+.kg_cache/
+*.json
+*.html

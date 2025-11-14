@@ -34,9 +34,13 @@ creates ``answer.html`` with the highlighted graph.
 
 from __future__ import annotations
 
+
 import argparse
 from typing import Dict, List, Set, Tuple
 import json
+
+# Add pyvis import
+from pyvis.network import Network
 
 # We avoid a dependency on networkx by implementing a simple
 # dictionary‑based graph representation.  If networkx is available
@@ -55,7 +59,8 @@ except ImportError:
     # If spaCy is not available, fall back to a simple keyword extractor.
     _SPACY_AVAILABLE = False
 
-
+import spacy
+_SPACY_AVAILABLE = True
 def load_graph(json_path: str) -> Dict:
     """Load a knowledge graph from a JSON or JSONL file into a simple structure.
 
@@ -168,10 +173,9 @@ def extract_keywords(question: str, nlp) -> List[str]:
     """Extract potential keywords from the question.
 
     If spaCy is available and ``nlp`` is provided, named entities
-    together with nouns and proper nouns are extracted.  Otherwise a
-    simple heuristic extracts words starting with an uppercase letter
-    or containing at least one capital letter.  Duplicate results are
-    removed, preserving order.
+    together with nouns and proper nouns are extracted. Otherwise
+    question is split into words and simple prepositions are removed.
+    Duplicate results are removed, preserving order.
 
     Parameters
     ----------
@@ -187,6 +191,7 @@ def extract_keywords(question: str, nlp) -> List[str]:
     """
     keywords: List[str] = []
     if _SPACY_AVAILABLE and nlp is not None:
+        print("\nUsing spaCy for keyword extraction.")
         doc = nlp(question)
         # Named entities
         for ent in doc.ents:
@@ -198,13 +203,17 @@ def extract_keywords(question: str, nlp) -> List[str]:
             if token.pos_ in {"NOUN", "PROPN"} and len(token.text.strip()) > 1:
                 keywords.append(token.lemma_.strip())
     else:
-        # Fallback: take any word that contains an uppercase letter
-        for token in question.split():
-            tok = token.strip(" .,!?:;()[]{}")
-            if not tok:
-                continue
-            if any(c.isupper() for c in tok):
-                keywords.append(tok)
+        # Fallback: Split on whitespace and filter
+        print("\nspaCy not available; using simple keyword extraction.")
+
+        stopwords = {"the", "is", "at", "which", "on", "for", "in", "a", "an", "and", "or", "of", "to",
+                     "what", "who", "when", "where", "why", "how", "do", "does", "did", "are", "were", "was", "that",
+                     "with", "by", "as", "from", "this", "these", "those", "it", "its"}
+        for word in question.split():
+            w = word.strip().lower()
+            if w and w not in stopwords and len(w) > 1:
+                keywords.append(word.strip())
+        
     # De‑duplicate preserving order (case‑insensitive)
     seen: Set[str] = set()
     unique_keywords: List[str] = []
@@ -330,85 +339,36 @@ def generate_answer(sub_g: Dict, seed_nodes: List[str]) -> str:
 
 
 def visualise(sub_g: Dict, seed_nodes: List[str], html_path: str) -> None:
-    """Generate an interactive HTML visualisation of the subgraph.
+    """Generate an interactive HTML visualisation of the subgraph using pyvis.
 
-    This function writes an HTML file that uses the ``vis-network``
-    JavaScript library to render the subgraph.  Nodes corresponding to
-    the seed nodes are coloured red and drawn larger, while other nodes
-    are coloured light blue.  Edges adjacent to seed nodes are coloured
-    red and drawn thicker.  Clicking and dragging nodes is supported
-    when the HTML file is opened in a browser.
-
-    Parameters
-    ----------
-    sub_g : Dict
-        The subgraph to visualise, as returned by ``build_subgraph``.
-    seed_nodes : List[str]
-        List of nodes considered important for highlighting.
-    html_path : str
-        Path to the output HTML file.
+    Nodes corresponding to the seed nodes are coloured red and drawn larger, while other nodes
+    are coloured light blue. Edges adjacent to seed nodes are coloured red and drawn thicker.
     """
-    # Build node and edge dictionaries for vis-network
-    node_data = []
+    net = Network(height="750px", width="100%", notebook=False, directed=True)
+    # Add nodes
     for node in sub_g["nodes"]:
         is_seed = node in seed_nodes
-        node_data.append({
-            "id": node,
-            "label": node,
-            "color": "red" if is_seed else "#a3c1da",
-            "size": 30 if is_seed else 15
-        })
-    edge_data = []
+        net.add_node(
+            node,
+            label=node,
+            color="red" if is_seed else "#a3c1da",
+            size=30 if is_seed else 15
+        )
+    # Add edges
     for u, targets in sub_g["edges"].items():
         for v, attrs in targets.items():
             preds = attrs.get("predicates", {"related_to"})
             label = "/".join(sorted(preds))
             is_highlight = u in seed_nodes or v in seed_nodes
-            edge_data.append({
-                "from": u,
-                "to": v,
-                "label": label,
-                "color": "red" if is_highlight else "#cccccc",
-                "width": 3 if is_highlight else 1
-            })
-    # Convert data to JSON strings
-    nodes_json = json.dumps(node_data)
-    edges_json = json.dumps(edge_data)
-    # Build HTML with vis-network
-    html = f"""
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>Knowledge Graph Visualisation</title>
-  <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
-  <style>
-    html, body {{ height: 100%; margin: 0; }}
-    #network {{ width: 100%; height: 100%; border: 1px solid lightgray; }}
-  </style>
-</head>
-<body>
-  <div id="network"></div>
-  <script type="text/javascript">
-    var nodes = new vis.DataSet({nodes_json});
-    var edges = new vis.DataSet({edges_json});
-    var container = document.getElementById('network');
-    var data = {{ nodes: nodes, edges: edges }};
-    var options = {{
-      interaction: {{ hover: true, multiselect: true }},
-      physics: {{
-        solver: 'barnesHut',
-        stabilization: {{ iterations: 200 }}
-      }},
-      layout: {{ improvedLayout: true }}
-    }};
-    var network = new vis.Network(container, data, options);
-  </script>
-</body>
-</html>
-"""
-    with open(html_path, 'w', encoding='utf-8') as f:
-        f.write(html)
+            net.add_edge(
+                u,
+                v,
+                label=label,
+                color="red" if is_highlight else "#cccccc",
+                width=3 if is_highlight else 1
+            )
+    # Use write_html with notebook=False to avoid Jinja2 error outside notebooks
+    net.write_html(html_path, notebook=False)
 
 
 def main() -> None:
@@ -425,9 +385,13 @@ def main() -> None:
         try:
             nlp = spacy.load("en_core_web_sm")  # type: ignore[name-defined]
         except Exception:
+            print("Failed to load spaCy model; proceeding without it. Try to download 'en_core_web_sm' model using: python -m spacy download en_core_web_sm")
             nlp = None
+
     # Extract keywords from the question
     keywords = extract_keywords(args.question, nlp)
+    print(f"Question: {args.question}")
+    print(f"Extracted keywords: {keywords}")
     if not keywords:
         print("No keywords were extracted from the question. Please rephrase your query.")
         return
@@ -440,10 +404,11 @@ def main() -> None:
     sub_g = build_subgraph(G, seed_nodes, depth=1)
     # Generate a simple answer based on the subgraph
     answer = generate_answer(sub_g, seed_nodes)
+    print("\nRelevant subgraph answer:\n")
     print(answer)
     # Create an interactive visualisation
     visualise(sub_g, seed_nodes, args.output_html)
-    print(f"Visualisation saved to {args.output_html}")
+    print(f"\nVisualisation saved to {args.output_html}")
 
 
 if __name__ == "__main__":

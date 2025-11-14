@@ -303,13 +303,13 @@ class OllamaClient(LLMClient):
     Ollama-compatible LLM client using the /api/generate endpoint.
     """
 
-    def __init__(self, model="llama3:latest", base_url="http://localhost:11434", default_options=None, timeout=120):
+    def __init__(self, model="llama3:latest", base_url="http://localhost:11434", default_options=None, timeout=300):
         self.model = model
         self.base_url = base_url
         # sensible defaults for extraction tasks
         self.default_options = default_options or {
             "num_ctx": 8192,        # ↑ context window so long docs don't truncate
-            "temperature": 0.1,     # low variance, more literal
+            "temperature": 0.02,     # low variance, more literal
             "top_p": 0.9,
             "top_k": 40,
             "repeat_penalty": 1.05,
