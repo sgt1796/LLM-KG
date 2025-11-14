@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 kg_rag_app.py
@@ -19,15 +18,6 @@ This file is designed to be dropped into the existing repo root and run as:
 
     export OPENAI_API_KEY=...
     python kg_rag_app.py --graph ADHD.json --host 0.0.0.0 --port 5000
-
-In this demo environment, external network calls (OpenAI, HF downloads) are disabled.
-To allow local testing of the app wiring, you can set:
-
-    export USE_DUMMY_EMBEDDER=1
-
-which will replace the real Embedder with a deterministic dummy that returns
-fixed-size random vectors. In your own environment, simply do NOT set this
-variable and real embeddings will be used.
 """
 
 from __future__ import annotations
@@ -52,51 +42,8 @@ load_dotenv()
 # ---- Import Embedder (your existing class) ---------------------------------
 
 from Embedder import Embedder  # type: ignore
-
-
-# ---- Optional: simple dummy embedder for offline testing --------------------
-
-
-class DummyEmbedder:
-    """
-    A simple deterministic embedder used ONLY when USE_DUMMY_EMBEDDER=1 is set.
-
-    It uses a fixed random seed so the same input text always maps to the same
-    vector, and different texts have different vectors, but the values are
-    arbitrary. This allows us to test the full stack (Flask, pyvis, JS) without
-    making external API calls.
-    """
-
-    def __init__(self, dim: int = 64):
-        self.dim = dim
-
-    def get_embedding(self, texts: List[str]) -> np.ndarray:
-        vecs = []
-        for t in texts:
-            seed = abs(hash(t)) % (2**32)
-            rng = np.random.default_rng(seed)
-            v = rng.normal(size=self.dim)
-            # normalize for cosine similarity
-            v = v / (np.linalg.norm(v) + 1e-8)
-            vecs.append(v.astype("f"))
-        return np.vstack(vecs)
-
-
-def make_embedder() -> DummyEmbedder | Embedder:
-    """
-    Factory that returns either the real Embedder or a DummyEmbedder,
-    depending on environment variables.
-    """
-    if os.getenv("USE_DUMMY_EMBEDDER") == "1":
-        print("[kg_rag_app] Using DummyEmbedder for offline testing.")
-        return DummyEmbedder(dim=64)
-
-    # Real embedder: use OpenAI API by default; you can tweak as needed
-    print("[kg_rag_app] Using real Embedder (OpenAI API).")
-    # You can change use_api/model_name to Jina or local HF model if you prefer.
-    return Embedder(use_api="openai", model_name=None)
-
-
+from llm_utils.LLMClient import OpenAIClient  # type: ignore
+from llm_utils.POP import PromptFunction  # type: ignore
 # ---- Data structures --------------------------------------------------------
 
 
@@ -105,10 +52,11 @@ class KGRagState:
     graph: nx.Graph
     node_ids: List[str]
     node_embeddings: np.ndarray  # shape: (N, D), assumed L2-normalized
-    embedder: DummyEmbedder | Embedder
+    embedder: Embedder
     triples: List[dict]
     graph_path: Path
     cache_dir: Path
+    incident_triples: Dict[str, List[dict]]
 
 
 # ---- Graph loading & embedding ----------------------------------------------
@@ -151,49 +99,101 @@ def load_graph(path: Path) -> Tuple[nx.Graph, List[str], List[dict]]:
     print(f"[kg_rag_app] Loaded graph: nodes={len(node_ids)}, edges={G.number_of_edges()}")
     return G, node_ids, triples
 
+def build_incident_triples(node_ids, triples):
+    incident = {n: [] for n in node_ids}
+    for tri in triples:
+        h = tri.get("h") or tri.get("subject")
+        t = tri.get("t") or tri.get("object")
+        if h in incident:
+            incident[h].append(tri)
+        if t in incident:
+            incident[t].append(tri)
+    return incident
+
+
+def build_node_text(node, incident_triples, max_triples=5):
+    pieces = [node]  # always begin with the label itself
+    used = 0
+    
+    for tri in incident_triples:
+        if used >= max_triples:
+            break
+
+        h = tri.get("subject") or tri.get("h")
+        r = tri.get("relation") or tri.get("r")
+        t = tri.get("object") or tri.get("t")
+
+        # Skip inconsistent triples
+        if node != h and node != t:
+            continue
+
+        # Human readable relation sentence
+        if node == h:
+            rel_str = f"{node} {r} {t}"
+        else:
+            rel_str = f"{h} {r} {node}"
+
+        pieces.append(f"Relation: {rel_str}.")
+
+        # Evidence
+        sources = tri.get("sources") or []
+        if sources:
+            ev = sources[0].get("evidence", "")
+            fn = (sources[0].get("doc_meta") or {}).get("filename", "")
+            if ev:
+                pieces.append(f"Evidence: {ev}")
+            if fn:
+                pieces.append(f"Paper: {fn}")
+
+        used += 1
+
+    return " ".join(pieces)
 
 def ensure_node_embeddings(
     graph_path: Path,
     node_ids: List[str],
-    embedder: DummyEmbedder | Embedder,
+    embedder: Embedder,
     cache_dir: Path,
+    incident_triples: Dict[str, List[dict]]
 ) -> np.ndarray:
-    """
-    Compute (or load cached) node embeddings.
 
-    We embed the node label itself for now. You can improve this by
-    embedding richer descriptions (e.g., concatenating neighbor labels,
-    relation types, evidence snippets, etc.).
-    """
     cache_dir.mkdir(parents=True, exist_ok=True)
     emb_path = cache_dir / f"{graph_path.stem}_node_embeddings.npy"
     idx_path = cache_dir / f"{graph_path.stem}_node_ids.json"
 
+    # Try load from cache
     if emb_path.exists() and idx_path.exists():
         with open(idx_path, "r", encoding="utf-8") as f:
             cached_ids = json.load(f)
         if cached_ids == node_ids:
             print(f"[kg_rag_app] Loading cached node embeddings from {emb_path}")
-            emb = np.load(emb_path)
-            return emb
+            return np.load(emb_path)
 
-    # (Re-)compute embeddings
+    # Build descriptive texts
     print("[kg_rag_app] Computing node embeddings via Embedder...")
-    texts = node_ids  # simple: each node is just its label
+
+    texts = [
+        build_node_text(n, incident_triples.get(n, []))
+        for n in node_ids
+    ]
+
     if not texts:
         raise SystemExit("[kg_rag_app] No nodes found to embed.")
+
+    # Call your existing Embedder
     emb = embedder.get_embedding(texts).astype("f")
 
     # Normalize for cosine similarity
     norms = np.linalg.norm(emb, axis=1, keepdims=True) + 1e-8
     emb = emb / norms
 
+    # Save
     np.save(emb_path, emb)
     with open(idx_path, "w", encoding="utf-8") as f:
         json.dump(node_ids, f, ensure_ascii=False, indent=2)
+
     print(f"[kg_rag_app] Saved embeddings to {emb_path}")
     return emb
-
 
 # ---- RAG logic --------------------------------------------------------------
 
@@ -252,12 +252,23 @@ def call_llm_answer(question: str, context: str) -> str:
     you can plug in POP.PromptFunction or a direct OpenAIClient call here.
     """
     # Example stub:
-    return (
-        "LLM answer stub.\n\n"
-        "In your real environment, replace `call_llm_answer` in kg_rag_app.py\n"
-        "with a call to POP.PromptFunction or your preferred LLM client,\n"
-        "passing the question and the `context` string shown above."
+    ai = PromptFunction(
+        sys_prompt="You are a helpful assistant that answers questions based on provided KG context.",
+        prompt="Context:\n<<<context>>>\n\nQuestion: <<<question>>>\n\nAnswer:",
+        client=OpenAIClient(),
     )
+
+    result = ai.execute(
+        model="gpt-5.1",
+        temperature=0.0,
+        context=context,
+        question=question,
+    )
+
+    # IMPORTANT: return only the LLM answer, not context+answer.
+    return result
+
+
 
 
 # ---- Build pyvis HTML + inject query bar ------------------------------------
@@ -326,18 +337,24 @@ def build_pyvis_html(graph_path: Path, height: str = "1000px", width: str = "100
     injection = r"""
 <!-- KG-RAG query panel injection -->
 <div id="kg-rag-panel" style="
-    position: fixed;
-    top: 10px; left: 10px;
-    z-index: 9999;
-    background: rgba(0,0,0,0.75);
-    padding: 10px;
-    border-radius: 8px;
-    color: #fff;
-    max-width: 420px;
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    font-size: 13px;
+  position: fixed;
+  top: 10px; left: 10px;
+  z-index: 9999;
+  background: rgba(0,0,0,0.75);
+  padding: 10px;
+  border-radius: 8px;
+  color: #fff;
+  max-width: 440px;
+  min-width: 220px;
+  min-height: 80px;
+  resize: both;
+  overflow: auto;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  box-shadow: 0 2px 16px rgba(0,0,0,0.25);
+  cursor: move;
 ">
-  <div style="font-weight: 600; margin-bottom: 6px;">
+  <div id="kg-rag-panel-header" style="font-weight: 600; margin-bottom: 6px; cursor: move; user-select: none;">
     KG-RAG Demo
   </div>
   <div style="display:flex; gap:6px; margin-bottom:6px;">
@@ -354,24 +371,138 @@ def build_pyvis_html(graph_path: Path, height: str = "1000px", width: str = "100
     ">Ask</button>
   </div>
   <div id="kg-query-status" style="font-size:11px; opacity:0.8; margin-bottom:4px;"></div>
-  <div id="kg-answer" style="
-        max-height: 200px;
-        overflow:auto;
+
+  <!-- Global answer area -->
+  <div id="kg-global-answer-box" style="
+        margin-bottom:6px;
         padding:6px 8px;
         border-radius:4px;
-        background:rgba(0,0,0,0.4);
+        background:rgba(0,0,0,0.35);
         font-size:12px;
-        white-space:pre-wrap;
-  "></div>
+        max-height:120px;
+        overflow:auto;
+  ">
+    <div style="font-size:11px; opacity:0.8; margin-bottom:2px;">
+      Overall answer (top-N context)
+    </div>
+    <div id="kg-global-answer" style="white-space:pre-wrap;"></div>
+  </div>
+
+  <!-- Node pager for switching among top-N nodes -->
+  <div id="kg-node-pager" style="
+        display:none;
+        align-items:center;
+        gap:6px;
+        margin-bottom:4px;
+        font-size:11px;
+  ">
+    <button id="kg-prev-node" style="
+        padding:2px 6px;
+        border-radius:999px;
+        border:0;
+        background:#444;
+        color:#fff;
+        cursor:pointer;
+    ">◀</button>
+    <span id="kg-node-label" style="flex:1; opacity:0.9;"></span>
+    <button id="kg-next-node" style="
+        padding:2px 6px;
+        border-radius:999px;
+        border:0;
+        background:#444;
+        color:#fff;
+        cursor:pointer;
+    ">▶</button>
+  </div>
+
+  <div id="kg-answer" style="
+            max-height: 220px;
+            overflow:auto;
+            padding:6px 8px;
+            border-radius:4px;
+            background:rgba(0,0,0,0.4);
+            font-size:12px;
+    ">
+        <div style="font-size:11px; opacity:0.8; margin-bottom:2px;">
+        Context triples
+        </div>
+        <pre id="kg-context" style="
+            margin:0 0 4px 0;
+            font-family:inherit;
+            white-space:pre-wrap;
+        "></pre>
+
+        <div style="
+            font-size:11px;
+            opacity:0.8;
+            margin-top:4px;
+            margin-bottom:2px;
+            border-top:1px solid rgba(255,255,255,0.2);
+            padding-top:4px;
+        ">
+        AI explanation
+        </div>
+        <div id="kg-ai-answer" style="white-space:pre-wrap;"></div>
+    </div>
+    </div>
+    <pre id="kg-context" style="
+          margin:0 0 4px 0;
+          font-family:inherit;
+          white-space:pre-wrap;
+    "></pre>
+
+    <div style="
+          font-size:11px;
+          opacity:0.8;
+          margin-top:4px;
+          margin-bottom:2px;
+          border-top:1px solid rgba(255,255,255,0.2);
+          padding-top:4px;
+    ">
+      AI explanation
+    </div>
+    <div id="kg-ai-answer" style="white-space:pre-wrap;"></div>
+  </div>
 </div>
 
 <script type="text/javascript">
+// --- Draggable and resizable panel ---
 (function(){
-  // We assume pyvis created 'network', 'nodes', 'edges' variables.
-  // If not yet defined, retry a bit later.
+  var panel = document.getElementById('kg-rag-panel');
+  var header = document.getElementById('kg-rag-panel-header');
+  var isDragging = false, dragOffsetX = 0, dragOffsetY = 0;
+  if (panel && header) {
+    header.addEventListener('mousedown', function(e) {
+      isDragging = true;
+      dragOffsetX = e.clientX - panel.offsetLeft;
+      dragOffsetY = e.clientY - panel.offsetTop;
+      document.body.style.userSelect = 'none';
+    });
+    document.addEventListener('mousemove', function(e) {
+      if (isDragging) {
+        panel.style.left = (e.clientX - dragOffsetX) + 'px';
+        panel.style.top = (e.clientY - dragOffsetY) + 'px';
+      }
+    });
+    document.addEventListener('mouseup', function(e) {
+      isDragging = false;
+      document.body.style.userSelect = '';
+    });
+  }
+  // State for current query results
+  var kgResult = {
+    nodes: [],              // [{id, score}, ...]
+    currentIndex: 0,
+    highlightedEdgeIds: [], // edges we modified
+    edgeOriginalStyles: {}, // id -> {color, width}
+    lastQuery: "",          // remember current question
+    globalAnswer: ""        // overall answer from top-N context
+  };
+
+
   function ensureVisObjects(cb, retries){
     retries = retries || 20;
-    if (typeof network !== 'undefined' && typeof nodes !== 'undefined') {
+    if (typeof network !== 'undefined' && typeof nodes !== 'undefined' && typeof edges !== 'undefined') {
       cb();
       return;
     }
@@ -379,35 +510,192 @@ def build_pyvis_html(graph_path: Path, height: str = "1000px", width: str = "100
     setTimeout(function(){ ensureVisObjects(cb, retries-1); }, 200);
   }
 
-  function highlightNodes(nodeIds){
-    if (!Array.isArray(nodeIds) || !nodeIds.length) return;
-    // Select the nodes and their connected edges (pyvis/vis.js highlights them)
-    network.unselectAll();
-    network.selectNodes(nodeIds, true);
-    // Focus on the first node
-    network.focus(nodeIds[0], {scale: 1.5, animation: true});
-  }
-
   function setStatus(msg){
     var el = document.getElementById("kg-query-status");
     if (el) el.textContent = msg || "";
   }
 
-  function setAnswer(msg){
-    var el = document.getElementById("kg-answer");
-    if (el) el.textContent = msg || "";
+  function setAnswer(ctx, ans){
+    var ctxEl = document.getElementById("kg-context");
+    var ansEl = document.getElementById("kg-ai-answer");
+    if (ctxEl) ctxEl.textContent = ctx || "";
+    if (ansEl) ansEl.textContent = ans || "";
+  }
+  function setGlobalAnswer(ans){
+    var el = document.getElementById("kg-global-answer");
+    if (el) el.textContent = ans || "";
+  }
+  function updateNodePager(){
+    var pager = document.getElementById("kg-node-pager");
+    var label = document.getElementById("kg-node-label");
+    if (!pager || !label) return;
+
+    if (!kgResult.nodes.length){
+      pager.style.display = "none";
+      label.textContent = "";
+      return;
+    }
+
+    pager.style.display = "flex";
+    var idx = kgResult.currentIndex;
+    if (idx < 0) idx = 0;
+    if (idx >= kgResult.nodes.length) idx = kgResult.nodes.length - 1;
+    var node = kgResult.nodes[idx];
+    label.textContent = (idx+1) + "/" + kgResult.nodes.length + "  " + node.id + "  (score=" + node.score.toFixed(3) + ")";
+  }
+
+  function resetHighlightedEdges(){
+    if (!kgResult.highlightedEdgeIds.length) return;
+    var updates = [];
+    kgResult.highlightedEdgeIds.forEach(function(eid){
+      var orig = kgResult.edgeOriginalStyles[eid];
+      if (!orig) return;
+      var u = { id: eid };
+      if (orig.color !== undefined) u.color = orig.color;
+      if (orig.width !== undefined) u.width = orig.width;
+      updates.push(u);
+    });
+    if (updates.length) edges.update(updates);
+    kgResult.highlightedEdgeIds = [];
+  }
+
+  function highlightEdgesBetweenSelected(selectedIds){
+    var selectedSet = {};
+    selectedIds.forEach(function(id){ selectedSet[id] = true; });
+
+    var es = edges.get();
+    var updates = [];
+
+    es.forEach(function(e){
+      var from = e.from, to = e.to;
+      if (selectedSet[from] && selectedSet[to]){
+        // store original once
+        if (!kgResult.edgeOriginalStyles[e.id]){
+          kgResult.edgeOriginalStyles[e.id] = {
+            color: e.color || undefined,
+            width: e.width || undefined
+          };
+        }
+        updates.push({
+          id: e.id,
+          color: { color: "#ffcc00" },
+          width: (e.width || 1) + 2
+        });
+        kgResult.highlightedEdgeIds.push(e.id);
+      }
+    });
+
+    if (updates.length) edges.update(updates);
+  }
+
+  function applyHighlightForCurrentResult(){
+    if (!kgResult.nodes.length) return;
+
+    // reset edge styles from previous query
+    resetHighlightedEdges();
+
+    var ids = kgResult.nodes.map(function(n){ return n.id; });
+    if (!ids.length) return;
+
+    // Select all result nodes (vis.js will already emphasize neighbors)
+    network.unselectAll();
+    network.selectNodes(ids, true);
+
+    // Focus on the "current" node in pager
+    var idx = kgResult.currentIndex;
+    if (idx < 0) idx = 0;
+    if (idx >= kgResult.nodes.length) idx = kgResult.nodes.length - 1;
+    kgResult.currentIndex = idx;
+    var currentId = kgResult.nodes[idx].id;
+    network.focus(currentId, { scale: 1.6, animation: true });
+
+    // Explicitly boost edges connecting nodes in the top-N set
+    highlightEdgesBetweenSelected(ids);
+
+    updateNodePager();
+  }
+  
+  function requestNodeExplain(){
+    if (!kgResult.nodes.length) return;
+
+    var idx = kgResult.currentIndex;
+    if (idx < 0 || idx >= kgResult.nodes.length) return;
+
+    var node = kgResult.nodes[idx];
+    var q = kgResult.lastQuery || "";
+    if (!q) {
+      // If for some reason we lost the query, try reading from the input
+      var input = document.getElementById("kg-query-input");
+      if (input) q = input.value.trim();
+    }
+    if (!q) return;
+
+    setStatus('Explaining why node "' + node.id + '" is relevant...');
+
+    fetch("/node_explain", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        query: q,
+        node_id: node.id,
+        global_answer: kgResult.globalAnswer   // NEW
+      })
+    })
+    .then(function(res){ return res.json(); })
+    .then(function(data){
+      if (data.error){
+        setStatus("Error: " + data.error);
+        return;
+      }
+      setStatus('Node "' + node.id + '" explanation loaded.');
+      // Node area: local triples + node contribution explanation
+      setAnswer(data.context || "", data.explanation || "");
+    })
+    .catch(function(err){
+      console.error(err);
+      setStatus("Node explanation failed; see console for details.");
+    });
+  }
+
+  function showNodeAt(index){
+    if (!kgResult.nodes.length) return;
+    if (index < 0) index = 0;
+    if (index >= kgResult.nodes.length) index = kgResult.nodes.length - 1;
+    kgResult.currentIndex = index;
+    applyHighlightForCurrentResult();
+    requestNodeExplain();   // now update context+answer for this single node
   }
 
   function attachHandlers(){
     var btn = document.getElementById("kg-query-btn");
     var input = document.getElementById("kg-query-input");
+    var prevBtn = document.getElementById("kg-prev-node");
+    var nextBtn = document.getElementById("kg-next-node");
+
     if (!btn || !input) return;
+
+    if (prevBtn){
+      prevBtn.addEventListener("click", function(){
+        showNodeAt(kgResult.currentIndex - 1);
+      });
+    }
+    if (nextBtn){
+      nextBtn.addEventListener("click", function(){
+        showNodeAt(kgResult.currentIndex + 1);
+      });
+    }
 
     function sendQuery(){
       var q = input.value.trim();
       if (!q) return;
       setStatus("Querying KG-RAG backend...");
-      setAnswer("");
+      setAnswer("", "");          // clear context + answer
+      // clear previous state
+      kgResult.nodes = [];
+      kgResult.lastQuery = q;     // remember question
+      resetHighlightedEdges();
+      updateNodePager();
+
       fetch("/query", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
@@ -420,14 +708,27 @@ def build_pyvis_html(graph_path: Path, height: str = "1000px", width: str = "100
           return;
         }
         setStatus("Top nodes highlighted based on semantic similarity.");
-        if (Array.isArray(data.nodes)){
-          var ids = data.nodes.map(function(n){ return n.id; });
-          highlightNodes(ids);
+
+        // Save and show the global answer based on full top-N context
+        kgResult.globalAnswer  = data.answer  || "";
+        kgResult.globalContext = data.context || "";
+        setGlobalAnswer(kgResult.globalAnswer);
+
+        // (Optional) show the global context in the per-node area before any node is selected
+        if (data.context || data.answer){
+          setAnswer(data.context || "", data.answer || "");
         }
-        if (data.answer){
-          setAnswer(data.answer);
-        } else if (data.context){
-          setAnswer(data.context);
+        if (Array.isArray(data.nodes) && data.nodes.length){
+          kgResult.nodes = data.nodes;
+          kgResult.currentIndex = 0;
+          applyHighlightForCurrentResult();
+          requestNodeExplain();  // this will now explain node 1 in terms of globalAnswer
+        } else {
+          setStatus("No matching nodes in visible graph.");
+        }
+
+        if (data.context || data.answer){
+          setAnswer(data.context || "", data.answer || "");
         }
       })
       .catch(function(err){
@@ -454,7 +755,41 @@ def build_pyvis_html(graph_path: Path, height: str = "1000px", width: str = "100
 
     return html
 
-
+def call_llm_node_explanation(
+    question: str,
+    global_answer: str,
+    node_id: str,
+    node_context: str,
+) -> str:
+    """
+    Ask the LLM to explain how a single node contributes
+    to the overall answer.
+    """
+    ai = PromptFunction(
+        sys_prompt=(
+            "You explain how individual knowledge-graph nodes and edges "
+            "contribute to answering a question. Be specific and honest "
+            "about how strong or weak the connection is."
+        ),
+        prompt=(
+            "Original question:\n<<<question>>>\n\n"
+            "Overall answer based on the full KG context:\n<<<global_answer>>>\n\n"
+            "Now focus on this single node: <<<node_id>>>.\n\n"
+            "Local KG triples involving this node:\n<<<node_context>>>\n\n"
+            "In 2–5 sentences, explain how this node and its incident edges "
+            "help support, refine, or challenge the overall answer above. "
+            "If the node is only weakly or indirectly related, say that explicitly."
+        ),
+        client='openai',
+    )
+    return ai.execute(
+        model="gpt-5.1",
+        temperature=0.1,
+        question=question,
+        global_answer=global_answer,
+        node_id=node_id,
+        node_context=node_context,
+    )
 
 # ---- Flask app wiring -------------------------------------------------------
 
@@ -472,11 +807,12 @@ def create_app(state: KGRagState) -> Flask:
             state.node_ids = filtered_ids
 
             state.node_embeddings = ensure_node_embeddings(
-            state.graph_path,
-            state.node_ids,
-            state.embedder,
-            state.cache_dir,
-        )
+                                       graph_path=state.graph_path,
+                                        node_ids=state.node_ids,
+                                        embedder=state.embedder,
+                                        cache_dir=state.cache_dir,
+                                        incident_triples=state.incident_triples
+                                    )
         else:
             # this should not happen bc we only filter using --largest-only
             print("[kg_rag_app] WARNING: no filtered nodes extracted; keeping original full node_ids")
@@ -523,9 +859,50 @@ def create_app(state: KGRagState) -> Flask:
             "answer": answer,
         })
 
+    @app.route("/node_explain", methods=["POST"])
+    def node_explain():
+        """
+        Explain how a SINGLE node contributes to the overall answer.
+
+        Uses only that node's incident triples + the global answer.
+        """
+        try:
+            payload = request.get_json(force=True) or {}
+            question = (payload.get("query") or "").strip()
+            node_id = str(payload.get("node_id") or "").strip()
+            global_answer = (payload.get("global_answer") or "").strip()
+        except Exception:
+            return jsonify({"error": "Invalid JSON payload."}), 400
+
+        if not question:
+            return jsonify({"error": "Empty query."}), 400
+        if not node_id:
+            return jsonify({"error": "Missing node_id."}), 400
+
+        node_triples = state.incident_triples.get(node_id, [])
+        context = build_llm_context(
+            triples=node_triples,
+            focus_nodes=[node_id],
+            max_triples=20,
+        )
+
+        explanation = call_llm_node_explanation(
+            question=question,
+            global_answer=global_answer,
+            node_id=node_id,
+            node_context=context,
+        )
+
+        return jsonify({
+            "node_id": node_id,
+            "context": context,        # local triples
+            "explanation": explanation # per-node explanation
+        })
+    
+
     return app
 
-
+    
 # ---- CLI entrypoint ---------------------------------------------------------
 
 
@@ -555,7 +932,9 @@ def main():
         raise SystemExit(f"[kg_rag_app] Graph file not found: {graph_path}")
 
     G, node_ids, triples = load_graph(graph_path)
-    embedder = make_embedder()
+    incident_triples = build_incident_triples(node_ids, triples)
+    
+    embedder = Embedder(use_api="openai", model_name="text-embedding-3-small")
     cache_dir = Path(args.cache_dir)
 
     state = KGRagState(
@@ -566,6 +945,7 @@ def main():
         triples=triples,
         graph_path=graph_path,
         cache_dir=cache_dir,
+        incident_triples=incident_triples
     )
 
     app = create_app(state)
