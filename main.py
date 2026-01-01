@@ -176,6 +176,7 @@ def main() -> None:
         print(f"[INFO] Interrupted run; saving to {out_path}")
 
     print(f"\nLabels: {store.labels}")
+    store.save()  # Persist updated labels to disk
     TripletGraphMerger.save_json(final_graph, out_path)
     print(f"Graph saved to {out_path}")
 

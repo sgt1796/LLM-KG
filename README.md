@@ -1,82 +1,132 @@
-# LLM Knowledge Graph Extraction Bot (Skeleton)
+# LLM-KG: Biomedical Knowledge Graph Extraction + KG-RAG
 
-This project provides a lightweight skeleton for building a bot that
-automatically extracts simple knowledge graphs from scientific papers.
-It is designed to be easy to extend and integrates with existing code
-from the `POP` and `GPT_embedding` repositories.
+This repo turns NCBI search results into a triple-based knowledge graph,
+then adds optional deduplication, visualization, and a Flask KG-RAG demo.
+It is designed for biomedical PDFs and supports both heuristic and LLM
+entity extraction.
 
-## Overview
+## What this project does
 
-The bot performs the following steps:
+- Download PDFs from a CSV/TSV export that includes PMCID or DOI.
+- Convert PDFs to text via Poppler `pdftotext`.
+- Optionally chunk documents by sections or abstract/discussion.
+- Extract entities via regex, spaCy, or LLM (OpenAI/Ollama via POP).
+- Build subject-relation-object triples with canonicalized relations.
+- Store evidence and provenance per triple.
+- Merge graphs and optionally dedupe/normalize large runs.
+- Visualize graphs with PyVis and query via a KG-RAG Flask app.
 
-1. **Data acquisition** – converts input PDF files into plain text using
-   the `pdftotext` command‐line utility that ships with Poppler.  This
-   approach avoids heavy dependencies and works offline.
-2. **Digest** – produces a rudimentary summary by selecting the first
-   few sentences of the document.  You can replace this with an LLM
-   summariser via the `PromptFunction` class imported from the
-   `POP` project when API keys are available.
-3. **Named entity recognition (NER)** – uses simple heuristics
-   (capitalisation, acronyms and alphanumeric patterns) to identify
-   candidate entities in each sentence.  This avoids pulling in
-   external NLP libraries such as spaCy or NLTK, which are not
-   available in the runtime environment.
-4. **Knowledge graph construction** – builds a graph of
-   subject–relation–object triples.  For every pair of entities that
-   co‑occur within a sentence, the substring between their mentions is
-   extracted and normalised to serve as a relation label.  If no
-   meaningful relation text is present, a generic ``"related_to"`` label
-   is used.  Triples are weighted by the number of times they are
-   observed across sentences.
-5. **Merging and saving** – allows merging a newly extracted triple
-   graph with an existing graph on disk and saving the result as JSON.
+## End-to-end workflow
 
-The repository includes placeholder code for chunking and RAG
-construction – these parts are intentionally left as stubs for future
-work.
+The example runner is `workflow_kg_extraction.py` (edit paths and
+uncomment steps to match your dataset). Typical flow:
 
-## Usage
+1) `fetch_ncbi.py` downloads PDFs from a CSV/TSV list.
+2) `sample_papers.sh` optionally samples a smaller subset.
+3) `main.py` builds a triple KG JSON from PDFs.
+4) `dedupe.py` normalizes and merges large graphs (optional).
+5) `pyvis_view.py` generates an interactive HTML view.
+6) `kg_rag_app.py` serves a KG-RAG web UI with embeddings + query.
 
-Run the example extraction on a PDF:
+## Quickstart
+
+Install dependencies and Poppler:
 
 ```bash
-python main.py --pdf ../2509.00140v1.pdf --output graph.json
+pip install -r requirements.txt
+# Ubuntu/Debian:
+sudo apt-get install poppler-utils
 ```
 
-This will create a JSON file containing the extracted nodes and
-triples.  If you supply the `--merge` flag with an existing graph, the
-graphs will be merged before saving.
+Download papers from an NCBI CSV/TSV export:
 
-## Project structure
-
-```
-llm_kg_bot/
-├── kg_pipeline/
-│   ├── __init__.py
-│   ├── data_acquisition.py   # PDF to text conversion
-│   ├── digestor.py           # Simple summarisation
-│   ├── ner.py                # Heuristic entity extraction
-│   ├── kg_builder.py         # Build undirected co‑occurrence graphs (legacy)
-│   ├── kg_merger.py          # Merge/saving utilities for co‑occurrence graphs
-│   ├── triple_builder.py     # Build subject–relation–object KGs
-│   └── triple_merger.py      # Merge/saving utilities for triple graphs
-├── llm_utils/
-│   ├── __init__.py
-│   ├── LLMClient.py          # Copied from POP
-│   └── POP.py                # Copied from POP
-├── main.py                   # Demonstration script
-└── README.md
+```bash
+python fetch_ncbi.py --csv dataset1-ADHDMeSHTe-set.csv --out papers --resume
 ```
 
-## Extending this skeleton
+Extract a knowledge graph:
 
-- **Summarisation** – replace the simple digestor with calls to
-  `PromptFunction` from `llm_utils.POP` when API keys are available.
-- **NER** – integrate a biomedical NER model (e.g. SciSpacy) once the
-  execution environment can install additional packages.
-- **Knowledge graph schema** – refine the graph construction to
-  capture typed relations rather than simple co‑occurrence.
-- **Chunking and RAG** – implement chunking of long documents and
-  build a retrieval‑augmented generation system using FAISS and
-  embedding techniques from `GPT_embedding`.  Stubs have been
-  provided for these components.
+```bash
+python main.py --pdf papers --output graph_llm.json --ner ollama --chunking sections
+```
+
+Visualize with PyVis:
+
+```bash
+python pyvis_view.py --input graph_llm.json --html graph_llm.html \
+  --weight ">=0" --k-core 0 --max-nodes 500 --max-edges 600 \
+  --label-top 20 --physics barnesHut --largest-only --directed --filter-menu
+```
+
+Run the KG-RAG Flask app:
+
+```bash
+python kg_rag_app.py --graph graph_llm.json --host 0.0.0.0 --port 5000
+```
+
+## Main extraction CLI
+
+`main.py` accepts a single PDF or a directory:
+
+```bash
+python main.py --pdf papers --output graph.json \
+  --ner simple|spacy|openai|ollama \
+  --chunking none|sections|abstract_discussion
+```
+
+Notes:
+- `--ner openai` and the KG-RAG app require `OPENAI_API_KEY`.
+- `--ner ollama` requires a local Ollama server running.
+- The dynamic relation label store lives at `kg_pipeline/.kg_cache/labels.json`.
+
+## Graph format
+
+Output is JSON with nodes and triples:
+
+```json
+{
+  "nodes": ["Entity A", "Entity B"],
+  "triples": [
+    {
+      "subject": "Entity A",
+      "relation": "associated with",
+      "object": "Entity B",
+      "weight": 3,
+      "sources": [
+        {
+          "doc_id": "abcd1234ef567890",
+          "doc_meta": {"filename": "paper.pdf"},
+          "chunk_id": 0,
+          "sentence_id": 4,
+          "page": null,
+          "char_span": [12, 56],
+          "evidence": "Entity A is associated with Entity B ...",
+          "confidence": 1.0
+        }
+      ]
+    }
+  ]
+}
+```
+
+## Project structure (core pieces)
+
+```
+.
+├── fetch_ncbi.py              # Download PDFs from NCBI/DOI lists
+├── main.py                    # KG extraction CLI
+├── workflow_kg_extraction.py  # Example end-to-end runner
+├── kg_pipeline/               # Chunking, NER, triple builder, provenance
+├── dedupe.py                  # Normalize and merge large graphs
+├── pyvis_view.py              # Interactive HTML visualization
+├── kg_rag_app.py              # Flask KG-RAG demo app
+├── Embedder.py                # Embedding wrapper (OpenAI/Jina/local)
+└── llm_utils/                 # POP + LLM client adapters
+```
+
+## Notes on embeddings and RAG
+
+`kg_rag_app.py` builds node embeddings using `Embedder.py` (OpenAI by
+default). It caches embeddings under `.kg_cache/` and uses cosine
+similarity to highlight the most relevant nodes for a query, with
+optional LLM explanations.
