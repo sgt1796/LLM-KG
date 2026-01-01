@@ -187,5 +187,6 @@ misc/
 papers/
 .vscode/
 .kg_cache/
+.github/
 *.json
 *.html
