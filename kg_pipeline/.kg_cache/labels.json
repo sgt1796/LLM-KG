@@ -1,5 +1,96 @@
 {
-  "labels": {},
+  "labels": {
+    "inhibits": {
+      "count": 137,
+      "first": 1767302023,
+      "last": 1772754851
+    },
+    "causes": {
+      "count": 377,
+      "first": 1767302062,
+      "last": 1772753225
+    },
+    "decreases": {
+      "count": 395,
+      "first": 1767302089,
+      "last": 1772754851
+    },
+    "increases": {
+      "count": 397,
+      "first": 1767302109,
+      "last": 1772754874
+    },
+    "correlates with": {
+      "count": 3,
+      "first": 1767302439,
+      "last": 1772753225
+    },
+    "treats": {
+      "count": 81,
+      "first": 1767302711,
+      "last": 1772754740
+    },
+    "mediates": {
+      "count": 45,
+      "first": 1767302711,
+      "last": 1772754538
+    },
+    "expresses": {
+      "count": 197,
+      "first": 1767302749,
+      "last": 1772754874
+    },
+    "associated with": {
+      "count": 163,
+      "first": 1767303145,
+      "last": 1772754193
+    },
+    "risk for": {
+      "count": 13,
+      "first": 1767303307,
+      "last": 1772751246
+    },
+    "regulates": {
+      "count": 205,
+      "first": 1767303316,
+      "last": 1772754725
+    },
+    "binds": {
+      "count": 11,
+      "first": 1767303615,
+      "last": 1772751666
+    },
+    "interacts with": {
+      "count": 1,
+      "first": 1767303615,
+      "last": 1767303615
+    },
+    "prevents": {
+      "count": 43,
+      "first": 1767303891,
+      "last": 1772753092
+    },
+    "promotes": {
+      "count": 43,
+      "first": 1767303891,
+      "last": 1772754740
+    },
+    "activates": {
+      "count": 89,
+      "first": 1767304277,
+      "last": 1772754610
+    },
+    "predicts": {
+      "count": 13,
+      "first": 1767304618,
+      "last": 1772750265
+    },
+    "encodes": {
+      "count": 7,
+      "first": 1767307986,
+      "last": 1772752561
+    }
+  },
   "max_labels": 384,
   "min_promote": 2,
   "sim_threshold": 0.86
