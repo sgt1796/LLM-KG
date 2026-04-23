@@ -23,4 +23,4 @@ run_command("python main.py --pdf GABA_papers --output GABA_graph.json --ner oll
 #run_command("python dedupe.py --input graph_dataset1_llm.json --output graph_clean_dataset1_llm.json --spacy-model en_core_sci_sm --min-support 3 --verbose-every 50000")
 
 # Step 5: Visualize using Pyvis
-run_command("python pyvis_view.py --input glyphosat.json --html glyphosat.html --weight \">=0\" --k-core 0 --max-nodes 500 --max-edges 600 --label-top 20 --physics barnesHut --largest-only --directed --filter-menu")
+run_command("python pyvis_view.py --input GABA_graph.json --html GABA_graph.html --weight \">=0\" --k-core 0 --max-nodes 500 --max-edges 600 --label-top 20 --physics barnesHut --largest-only --directed --filter-menu")

@@ -17,7 +17,6 @@ from .tuple_merger import WeightedTupleMerger    # noqa: F401
 
 # Triplet‑based builder and merger for subject–relation–object graphs
 from .triple_builder import TripletKnowledgeGraphBuilder  # noqa: F401
-from .triple_builder_general import TripletKnowledgeGraphBuilder as GeneralTripletKnowledgeGraphBuilder  # noqa: F401
 from .triple_merger import TripletGraphMerger            # noqa: F401
 
 # source tracking
@@ -34,7 +33,6 @@ __all__ = [
     "WeightedTupleBuilder",
     "WeightedTupleMerger",
     "TripletKnowledgeGraphBuilder",
-    "GeneralTripletKnowledgeGraphBuilder",
     "TripletGraphMerger",
     "DocumentChunker",
     "DocMeta",

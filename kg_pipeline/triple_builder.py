@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Set, Tuple, Any
+from typing import Any, Dict, Iterable, List, Set, Tuple
 import re
 from kg_pipeline.provenance import DocContext, Evidence
 from kg_pipeline.label_store import LabelStore
@@ -101,89 +101,193 @@ _CANON_SYNONYMS: Dict[str, List[str]] = {
     ],
 }
 
-# Flatten the synonym mapping into a list of (synonym, canonical) pairs sorted
-# by descending length to prefer longer multi‑word matches.  This is recomputed
-# after the canonical mapping is defined so that any updates to
-# ``_CANON_SYNONYMS`` are reflected in the flattened list.
-_SYNONYM_PAIRS: List[Tuple[str, str]] = []
-for _canon, _syns in _CANON_SYNONYMS.items():
-    for _syn in _syns:
-        _SYNONYM_PAIRS.append((_syn, _canon))
-_SYNONYM_PAIRS.sort(key=lambda x: len(x[0]), reverse=True)
+_INVERTED_SYNONYMS: Dict[str, List[str]] = {
+    "causes": [
+        "caused by", "induced by", "resulting from", "results from", "triggered by"
+    ],
+    "risk for": [
+        "risk from", "risk due to", "risk attributable to"
+    ],
+    "inhibits": [
+        "is inhibited by", "inhibited by", "suppressed by", "downregulated by"
+    ],
+    "activates": [
+        "is activated by", "activated by", "stimulated by", "upregulated by"
+    ],
+    "increases": [
+        "is increased by", "increased by", "enhanced by", "raised by"
+    ],
+    "decreases": [
+        "is decreased by", "decreased by", "reduced by", "lowered by"
+    ],
+    "treats": [
+        "is treated with", "treated with", "therapy with"
+    ],
+}
 
-# A simple list of canonical relation labels; used as a secondary fall‑back
-_VERBISH: List[str] = list(_CANON_SYNONYMS.keys())
+_JUNK = {"and", "of", "with", "in", "for", "the", "between", "to", "by", "on", "from", "at", "as"}
+_ALLOWED_ENUM_TOKENS = {"and", "or"}
+_TOKEN_PATTERN = re.compile(r"\b[\w-]+\b")
+_NEGATION_PATTERN = re.compile(
+    r"\b(?:no|not|never|without|neither|nor|"
+    r"fail(?:ed|s|ing)?\s+to|lack(?:ed|s|ing)?(?:\s+of)?|"
+    r"did\s+not|does\s+not|do\s+not|cannot|can't)\b",
+    re.IGNORECASE,
+)
+_HEDGE_PATTERN = re.compile(
+    r"\b(?:may|might|could|possibly|potentially|suggest(?:s|ed)?|"
+    r"appear(?:s|ed)?(?:\s+to)?|seem(?:s|ed)?(?:\s+to)?|likely|unlikely)\b",
+    re.IGNORECASE,
+)
+_CONTEXT_WINDOW = 32
+_GUARD_WINDOW = 48
 
 
-def _extract_relation(span: str, sentence: str = "", left_ctx: str = "", right_ctx: str = "") -> str:
-    """Extract a canonical relation phrase from the text between two entities.
+@dataclass(frozen=True)
+class RelationPattern:
+    canonical: str
+    synonym: str
+    direction: int
+    pattern: re.Pattern[str] = field(compare=False, repr=False)
 
-    This helper uses a multi‑stage heuristic to identify meaningful
-    predicates that link two entity mentions.  It first normalises and
-    searches the span for known relation patterns (verbs and short
-    phrases).  If none are found in the span, it will fall back to
-    scanning the immediate left and right context of the span.  If no
-    useful relation can be identified the function returns either
-    ``"related_to"`` or a special ``"__SKIP__`` token to indicate that
-    the pair should be skipped entirely.
 
-    Parameters
-    ----------
-    span : str
-        The substring of the original sentence between two entity
-        mentions.  This is lower‑cased and stripped of leading/trailing
-        whitespace for matching.
-    sentence : str, optional
-        The full sentence containing the entities.  Used when
-        falling back to context scanning.
-    left_ctx : str, optional
-        Up to 20 characters of context immediately preceding the span.
-    right_ctx : str, optional
-        Up to 20 characters of context immediately following the span.
+@dataclass(frozen=True)
+class RelationMatch:
+    relation: str
+    direction: int
+    source: str
+    match_text: str
+    match_span: Tuple[int, int]
 
-    Returns
-    -------
-    str
-        A canonical relation phrase or special token.  Returning
-        ``"__SKIP__"`` indicates that the span contains only junk words
-        and no triple should be recorded.  Returning ``"related_to"``
-        provides a generic edge when no specific relation is detected.
-    """
 
-    # Normalise the span: collapse whitespace and lowercase it
+@dataclass(frozen=True)
+class MentionSpan:
+    entity: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class TripletCandidate:
+    subject: str
+    relation: str
+    object: str
+    subject_span: Tuple[int, int]
+    object_span: Tuple[int, int]
+    relation_span: Tuple[int, int]
+    relation_source: str
+
+
+def _compile_phrase_pattern(phrase: str) -> re.Pattern[str]:
+    """Compile a token-boundary regex for a relation phrase."""
+    parts = [re.escape(part) for part in phrase.split()]
+    body = r"\s+".join(parts) if parts else re.escape(phrase)
+    return re.compile(rf"(?<!\w){body}(?!\w)", re.IGNORECASE)
+
+
+def _build_relation_patterns() -> List[RelationPattern]:
+    """Create ordered relation patterns, preferring longer phrases first."""
+    patterns: List[RelationPattern] = []
+    seen: Set[Tuple[str, str, int]] = set()
+    for canonical, synonyms in _CANON_SYNONYMS.items():
+        for synonym in synonyms:
+            key = (canonical, synonym.casefold(), 1)
+            if key in seen:
+                continue
+            seen.add(key)
+            patterns.append(
+                RelationPattern(
+                    canonical=canonical,
+                    synonym=synonym,
+                    direction=1,
+                    pattern=_compile_phrase_pattern(synonym),
+                )
+            )
+    for canonical, synonyms in _INVERTED_SYNONYMS.items():
+        for synonym in synonyms:
+            key = (canonical, synonym.casefold(), -1)
+            if key in seen:
+                continue
+            seen.add(key)
+            patterns.append(
+                RelationPattern(
+                    canonical=canonical,
+                    synonym=synonym,
+                    direction=-1,
+                    pattern=_compile_phrase_pattern(synonym),
+                )
+            )
+    patterns.sort(key=lambda spec: len(spec.synonym), reverse=True)
+    return patterns
+
+
+_RELATION_PATTERNS = _build_relation_patterns()
+
+
+def _has_guard(text: str, start: int, end: int) -> bool:
+    """Return True when a nearby negation or hedge should suppress a match."""
+    window_start = max(0, start - _GUARD_WINDOW)
+    window_end = min(len(text), end + 16)
+    local = text[window_start:window_end]
+    rel_start = start - window_start
+    rel_end = end - window_start
+    prefix = local[:rel_start]
+    scope = f"{prefix[-_GUARD_WINDOW:]} {local[rel_start:rel_end]} {local[rel_end:rel_end + 16]}"
+    if _NEGATION_PATTERN.search(scope):
+        return True
+    if _HEDGE_PATTERN.search(prefix[-_GUARD_WINDOW:]):
+        return True
+    return False
+
+
+def _search_relation_source(text: str, *, base_offset: int, source: str) -> RelationMatch | None:
+    """Search one source segment for the best relation match."""
+    for spec in _RELATION_PATTERNS:
+        match = spec.pattern.search(text)
+        if not match:
+            continue
+        if _has_guard(text, match.start(), match.end()):
+            continue
+        return RelationMatch(
+            relation=spec.canonical,
+            direction=spec.direction,
+            source=source,
+            match_text=match.group(0),
+            match_span=(base_offset + match.start(), base_offset + match.end()),
+        )
+    return None
+
+
+def _extract_relation(
+    span: str,
+    sentence: str = "",
+    left_ctx: str = "",
+    right_ctx: str = "",
+    *,
+    span_offset: int = 0,
+    left_offset: int = 0,
+    right_offset: int = 0,
+) -> RelationMatch | None:
+    """Extract a relation match and its direction from a mention pair context."""
     cleaned = span.strip() if span else ""
-    low = cleaned.lower()
+    low = cleaned.casefold()
 
-    # If the span is empty or extremely long, treat it as uninformative
-    if not low or len(low) > 50:
-        low = ""
+    if low and len(low) <= 80 and not all(tok in _JUNK for tok in low.split()):
+        match = _search_relation_source(span, base_offset=span_offset, source="span")
+        if match is not None:
+            return match
 
-    # A minimal stopword set used to flag spans consisting solely of junk
-    JUNK = {"and", "of", "with", "in", "for", "the", "between", "to", "by", "on", "from", "at", "as"}
+    if left_ctx:
+        match = _search_relation_source(left_ctx, base_offset=left_offset, source="left_ctx")
+        if match is not None:
+            return match
 
-    # If the span itself consists solely of junk words, skip this pair entirely
-    if low and all(tok in JUNK for tok in low.split()):
-        return "__SKIP__"
+    if right_ctx:
+        match = _search_relation_source(right_ctx, base_offset=right_offset, source="right_ctx")
+        if match is not None:
+            return match
 
-    # Attempt to find a known relation phrase directly in the span
-    if low:
-        for syn, canon in _SYNONYM_PAIRS:
-            if syn in low:
-                return canon
-
-    # If nothing matched in the span, also search in the immediate context
-    ctx = f"{left_ctx.lower()} {low} {right_ctx.lower()}"
-    for syn, canon in _SYNONYM_PAIRS:
-        if syn in ctx:
-            return canon
-
-    # As a final heuristic, look for any of the canonical relations in the context
-    for v in _VERBISH:
-        if v in ctx:
-            return v
-
-    # If no relation found, return the generic relation
-    return "related_to"
+    return None
 
 @dataclass
 class TripletKnowledgeGraphBuilder:
@@ -201,64 +305,147 @@ class TripletKnowledgeGraphBuilder:
     _seen_evidence: Set[Tuple] = field(default_factory=set)  # dedupe key 
     label_store: LabelStore | None = None  # NEW: optional shared store for dynamic labels
 
-    def _entity_positions(self, sentence: str, entities: Set[str]) -> List[Tuple[int, str]]:
-        """Return a list of (start_index, entity) tuples sorted by position.
+    def _iter_fallback_occurrences(self, sentence: str, entity: str) -> List[Tuple[int, int]]:
+        """Return approximate substring occurrences when boundary matching fails."""
+        spans: List[Tuple[int, int]] = []
+        sent_low = sentence.casefold()
+        ent_low = entity.casefold()
+        start = 0
+        while True:
+            idx = sent_low.find(ent_low, start)
+            if idx < 0:
+                break
+            spans.append((idx, idx + len(entity)))
+            start = idx + len(entity)
+        return spans
 
-        This helper lower‑cases the sentence and entity strings for
-        approximate matching.  It returns the index of the first
-        occurrence of each entity.  Entities that are not found are
-        ignored.
-
-        Parameters
-        ----------
-        sentence : str
-            The full sentence containing the entities.
-        entities : set of str
-            The unique entity names extracted from the sentence.
-
-        Returns
-        -------
-        list of tuples
-            A list of ``(position, entity)`` sorted by position in
-            ascending order.  Only entities located in the sentence are
-            included.
-        """
-        pos_list: List[Tuple[int, str]] = []
-        sent_low = sentence.lower()
-        # Precompile regex patterns for each entity to match whole words.  This
-        # prevents partial matching of substrings (e.g. entity "C" matching
-        # the letter "c" in "interacts").  If no whole‑word match is found
-        # we fall back to a simple substring search to ensure we still
-        # capture approximate positions.
-        for ent in entities:
+    def _entity_mentions(self, sentence: str, entities: Set[str]) -> List[MentionSpan]:
+        """Return every detected mention span for the provided entities."""
+        mentions: List[MentionSpan] = []
+        seen: Set[Tuple[int, int, str]] = set()
+        for ent in sorted(entities, key=lambda value: (-len(value), value.casefold())):
             ent_clean = ent.strip()
             if not ent_clean:
                 continue
-            ent_low = ent_clean.lower()
-            # Build a regex that matches the entity as a whole word.  Word
-            # boundaries (\b) ensure we don't match substrings inside
-            # larger tokens.  Some biomedical entities include hyphens or
-            # other punctuation; escaping handles those safely.
-            try:
-                import re  # local import to avoid a global dependency if unused
-                pattern = re.compile(r"\b" + re.escape(ent_low) + r"\b", re.IGNORECASE)
-                match = pattern.search(sentence)
-                if match:
-                    idx = match.start()
-                else:
-                    # fallback: approximate match by substring search
-                    idx = sent_low.find(ent_low)
-                    if idx < 0:
-                        continue
-            except Exception:
-                # as a last resort, use substring search
-                idx = sent_low.find(ent_low)
-                if idx < 0:
+            pattern = _compile_phrase_pattern(ent_clean)
+            matches = list(pattern.finditer(sentence))
+            spans = [(match.start(), match.end()) for match in matches]
+            if not spans:
+                spans = self._iter_fallback_occurrences(sentence, ent_clean)
+            for start, end in spans:
+                key = (start, end, ent_clean.casefold())
+                if key in seen:
                     continue
-            pos_list.append((idx, ent_clean))
-        # sort by starting index to maintain textual order
-        pos_list.sort(key=lambda x: x[0])
-        return pos_list
+                seen.add(key)
+                mentions.append(MentionSpan(entity=ent_clean, start=start, end=end))
+        mentions.sort(key=lambda mention: (mention.start, -(mention.end - mention.start), mention.entity.casefold()))
+        return mentions
+
+    def _entity_positions(self, sentence: str, entities: Set[str]) -> List[Tuple[int, str]]:
+        """Return all entity start positions, preserving duplicate mentions."""
+        return [(mention.start, mention.entity) for mention in self._entity_mentions(sentence, entities)]
+
+    def _entity_token_set(self, mentions: List[MentionSpan]) -> Set[str]:
+        """Return lower-cased tokens seen in entity strings."""
+        tokens: Set[str] = set()
+        for mention in mentions:
+            for token in _TOKEN_PATTERN.findall(mention.entity.casefold()):
+                tokens.add(token)
+        return tokens
+
+    def _should_skip_mention_pair(
+        self,
+        sentence: str,
+        mentions: List[MentionSpan],
+        left_idx: int,
+        right_idx: int,
+        match: RelationMatch,
+    ) -> bool:
+        """Suppress remote mention pairs that cross other entities or clauses."""
+        if right_idx <= left_idx + 1:
+            return False
+        if match.source != "span":
+            return True
+
+        right_mention = mentions[right_idx]
+        intermediate_mentions = mentions[left_idx + 1:right_idx]
+        first_intermediate = intermediate_mentions[0]
+        if match.match_span[0] >= first_intermediate.start:
+            return True
+
+        entity_tokens = self._entity_token_set(mentions)
+        sub_span = sentence[first_intermediate.end:right_mention.start].casefold()
+        words = _TOKEN_PATTERN.findall(sub_span)
+        return any(
+            (word not in _ALLOWED_ENUM_TOKENS) and (word not in entity_tokens)
+            for word in words
+        )
+
+    def _extract_triplet_candidates(self, sentence: str, entities: Set[str]) -> List[TripletCandidate]:
+        """Return raw triplet candidates with mention span metadata."""
+        result: List[TripletCandidate] = []
+        if not entities or len(entities) < 2:
+            return result
+
+        mentions = self._entity_mentions(sentence, entities)
+        if len(mentions) < 2:
+            return result
+
+        seen: Set[Tuple[str, str, str, Tuple[int, int], Tuple[int, int], Tuple[int, int]]] = set()
+        for left_idx, left_mention in enumerate(mentions):
+            for right_idx in range(left_idx + 1, len(mentions)):
+                right_mention = mentions[right_idx]
+                if left_mention.end > right_mention.start:
+                    continue
+                if left_mention.entity.casefold() == right_mention.entity.casefold():
+                    continue
+
+                span_start = left_mention.end
+                span_end = right_mention.start
+                match = _extract_relation(
+                    sentence[span_start:span_end],
+                    sentence=sentence,
+                    left_ctx=sentence[max(0, span_start - _CONTEXT_WINDOW):span_start],
+                    right_ctx=sentence[span_end:min(len(sentence), span_end + _CONTEXT_WINDOW)],
+                    span_offset=span_start,
+                    left_offset=max(0, span_start - _CONTEXT_WINDOW),
+                    right_offset=span_end,
+                )
+                if match is None:
+                    continue
+                if self._should_skip_mention_pair(sentence, mentions, left_idx, right_idx, match):
+                    continue
+
+                if match.direction >= 0:
+                    subject_mention = left_mention
+                    object_mention = right_mention
+                else:
+                    subject_mention = right_mention
+                    object_mention = left_mention
+
+                key = (
+                    subject_mention.entity,
+                    match.relation,
+                    object_mention.entity,
+                    (subject_mention.start, subject_mention.end),
+                    (object_mention.start, object_mention.end),
+                    match.match_span,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                result.append(
+                    TripletCandidate(
+                        subject=subject_mention.entity,
+                        relation=match.relation,
+                        object=object_mention.entity,
+                        subject_span=(subject_mention.start, subject_mention.end),
+                        object_span=(object_mention.start, object_mention.end),
+                        relation_span=match.match_span,
+                        relation_source=match.source,
+                    )
+                )
+        return result
 
     def _canonicalise_relation(self, relation: str) -> str | None:
         """Map a detected relation into a persisted canonical label using LabelStore."""
@@ -295,28 +482,22 @@ class TripletKnowledgeGraphBuilder:
         # Record every entity as a node, regardless of pairwise relations
         for e in entities:
             self.nodes.add(e)
-        # Extract meaningful triples from this sentence
-        triples = self.extract_triplets(sentence, entities)
-        for subj, relation, obj in triples:
-            relation = self._canonicalise_relation(relation)
+        # Extract meaningful triples from this sentence.
+        # Relation canonicalisation happens here exactly once so LabelStore
+        # counts are not inflated by helper calls.
+        for candidate in self._extract_triplet_candidates(sentence, entities):
+            relation = self._canonicalise_relation(candidate.relation)
             if not relation:
                 continue
-            key = (subj, relation, obj)
+            key = (candidate.subject, relation, candidate.object)
             if context is None:
                 # legacy behavior: just count
                 self.triples[key]["weight"] += 1
             else:
-                # attach one evidence row per triple occurrence (per sentence)
-                # best-effort char_span: cover both mentions bounding box
-                # (we don't have per-entity spans here; approximate from names)
-                s_idx = sentence.lower().find(subj.lower())
-                o_idx = sentence.lower().find(obj.lower())
-                if s_idx < 0 or o_idx < 0:
-                    char_span = (0, 0)
-                else:
-                    s_end = s_idx + len(subj)
-                    o_end = o_idx + len(obj)
-                    char_span = (min(s_idx, o_idx), max(s_end, o_end))
+                char_span = (
+                    min(candidate.subject_span[0], candidate.object_span[0]),
+                    max(candidate.subject_span[1], candidate.object_span[1]),
+                )
 
                 ev = Evidence(
                     doc_id=context.doc_id,
@@ -366,110 +547,10 @@ class TripletKnowledgeGraphBuilder:
             A list of ``(subject, relation, object)`` triplets for which
             a meaningful relation was detected.
         """
-        result: List[Tuple[str, str, str]] = []
-        if not entities or len(entities) < 2:
-            return result
-        # Determine positions of entities within the sentence
-        pos_entities = self._entity_positions(sentence, entities)
-        # Fallback: if positions are missing for some entities, we cannot
-        # reliably orient subject/object order.  In that case, we refrain
-        # from generating any relation-specific triples and return an
-        # empty list, delegating to generic co-occurrence if needed.
-        if not pos_entities or len(pos_entities) < 2:
-            return result
-        n = len(pos_entities)
-        for i in range(n):
-            subj_pos, subj = pos_entities[i]
-            for j in range(i + 1, n):
-                obj_pos, obj = pos_entities[j]
-                # Extract the raw substring between the two entity mentions
-                start = subj_pos + len(subj)
-                end = obj_pos
-                span = sentence[start:end]
-                # Capture a small amount of surrounding context to aid in
-                # relation extraction when the span is empty or too long
-                left_ctx = sentence[max(0, start - 20):start]
-                right_ctx = sentence[end:min(len(sentence), end + 20)]
-                relation = _extract_relation(span, sentence, left_ctx, right_ctx)
-                # Skip spans that produce no informative relation
-                if relation in ("__SKIP__",""): # for now reserve  "related_to"
-                    continue
-                # Ensure that the canonical relation occurs within the span itself.
-                # If it was only detected via context, disregard this pair.
-                span_lower = span.lower()
-                contains_rel = False
-                for syn, canon in _SYNONYM_PAIRS:
-                    if canon == relation and syn in span_lower:
-                        contains_rel = True
-                        break
-                if not contains_rel:
-                    continue
-                # Avoid transitive/enum relations for non‑adjacent entities
-                skip_triple = False
-                if j > i + 1:
-                    # Determine position of the next entity between subject and object
-                    inter_pos, inter_ent = pos_entities[i + 1]
-                    # Lower‑case span for matching intermediate entity
-                    span_lower_full = span.lower()
-                    inter_idx = None
-                    try:
-                        pat = re.compile(r"\b" + re.escape(inter_ent.lower()) + r"\b")
-                        m = pat.search(span_lower_full)
-                        if m:
-                            inter_idx = m.start()
-                    except Exception:
-                        pass
-                    if inter_idx is None:
-                        inter_idx = span_lower_full.find(inter_ent.lower())
-                    # Collect positions of the relation phrase(s) in the span
-                    rel_positions: List[int] = []
-                    for syn, canon in _SYNONYM_PAIRS:
-                        if canon == relation:
-                            search_start = 0
-                            while True:
-                                idx = span_lower_full.find(syn, search_start)
-                                if idx == -1:
-                                    break
-                                rel_positions.append(idx)
-                                search_start = idx + 1
-                    if inter_idx is not None and rel_positions:
-                        # If any relation occurs after the intermediate entity
-                        if any(pos > inter_idx for pos in rel_positions):
-                            skip_triple = True
-                if skip_triple:
-                    continue
-                # Additional guard: ensure the subsegment between the intermediate
-                # entity and the object contains only simple conjunctions for
-                # non‑adjacent entities.  This prevents linking to remote
-                # clauses (e.g. "acts as").
-                if j > i + 1:
-                    # Determine the substring between the end of the first
-                    # intermediate entity and the start of the current object
-                    inter_start, inter_ent = pos_entities[i + 1]
-                    inter_end = inter_start + len(inter_ent)
-                    sub_span = sentence[inter_end:obj_pos].lower()
-                    try:
-                        words = re.findall(r"\b\w+\b", sub_span)
-                    except Exception:
-                        words = sub_span.split()
-                    # In enumeration constructs, other entity names may appear
-                    # between the intermediate and the target (e.g., "B, C and D").
-                    # We therefore allow known entity tokens as well as simple
-                    # conjunctions.  Any extra word outside these sets causes
-                    # the triple to be skipped.
-                    allowed_conj = {"and", "or"}
-                    # Build a set of lowercased entity names for quick lookup
-                    entity_tokens = {e.lower() for _, e in pos_entities}
-                    if any((w not in allowed_conj) and (w not in entity_tokens) for w in words):
-                       continue
-
-                # Final dynamic canonicalisation / gating
-                relation = self._canonicalise_relation(relation)
-                if not relation:
-                   continue
-
-                result.append((subj, relation, obj))
-        return result
+        return [
+            (candidate.subject, candidate.relation, candidate.object)
+            for candidate in self._extract_triplet_candidates(sentence, entities)
+        ]
 
     def build_from_sentences(
         self,

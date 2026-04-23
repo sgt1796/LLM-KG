@@ -1,94 +1,99 @@
 {
   "labels": {
     "inhibits": {
-      "count": 137,
+      "count": 188,
       "first": 1767302023,
-      "last": 1772754851
+      "last": 1776967874
     },
     "causes": {
-      "count": 377,
+      "count": 983,
       "first": 1767302062,
-      "last": 1772753225
+      "last": 1776967877
     },
     "decreases": {
-      "count": 395,
+      "count": 863,
       "first": 1767302089,
-      "last": 1772754851
+      "last": 1776967874
     },
     "increases": {
-      "count": 397,
+      "count": 663,
       "first": 1767302109,
-      "last": 1772754874
+      "last": 1776967878
     },
     "correlates with": {
-      "count": 3,
+      "count": 47,
       "first": 1767302439,
-      "last": 1772753225
+      "last": 1776967849
     },
     "treats": {
-      "count": 81,
+      "count": 204,
       "first": 1767302711,
-      "last": 1772754740
+      "last": 1776967867
     },
     "mediates": {
-      "count": 45,
+      "count": 58,
       "first": 1767302711,
-      "last": 1772754538
+      "last": 1776967865
     },
     "expresses": {
-      "count": 197,
+      "count": 227,
       "first": 1767302749,
-      "last": 1772754874
+      "last": 1776967874
     },
     "associated with": {
-      "count": 163,
+      "count": 854,
       "first": 1767303145,
-      "last": 1772754193
+      "last": 1776967878
     },
     "risk for": {
-      "count": 13,
+      "count": 59,
       "first": 1767303307,
-      "last": 1772751246
+      "last": 1776967865
     },
     "regulates": {
-      "count": 205,
+      "count": 1091,
       "first": 1767303316,
-      "last": 1772754725
+      "last": 1776967878
     },
     "binds": {
-      "count": 11,
+      "count": 45,
       "first": 1767303615,
-      "last": 1772751666
+      "last": 1776967846
     },
     "interacts with": {
-      "count": 1,
+      "count": 39,
       "first": 1767303615,
-      "last": 1767303615
+      "last": 1776967877
     },
     "prevents": {
-      "count": 43,
+      "count": 54,
       "first": 1767303891,
-      "last": 1772753092
+      "last": 1776967723
     },
     "promotes": {
-      "count": 43,
+      "count": 104,
       "first": 1767303891,
-      "last": 1772754740
+      "last": 1776967874
     },
     "activates": {
-      "count": 89,
+      "count": 149,
       "first": 1767304277,
-      "last": 1772754610
+      "last": 1776967874
     },
     "predicts": {
-      "count": 13,
+      "count": 25,
       "first": 1767304618,
-      "last": 1772750265
+      "last": 1776967779
     },
     "encodes": {
-      "count": 7,
+      "count": 51,
       "first": 1767307986,
-      "last": 1772752561
+      "last": 1776967874
+    },
+    "suppresses": {
+      "count": 6,
+      "first": 1776924656,
+      "last": 1776967797
     }
   },
   "max_labels": 384,
