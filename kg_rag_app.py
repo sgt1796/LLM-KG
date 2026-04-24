@@ -28,7 +28,7 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 import sys, subprocess
 import re
 
@@ -42,6 +42,7 @@ load_dotenv()
 # ---- Import Embedder (your existing class) ---------------------------------
 
 from Embedder import Embedder  # type: ignore
+from kg_pipeline.rag import build_index
 from llm_utils.LLMClient import OpenAIClient  # type: ignore
 from llm_utils.POP import PromptFunction  # type: ignore
 # ---- Data structures --------------------------------------------------------
@@ -50,13 +51,11 @@ from llm_utils.POP import PromptFunction  # type: ignore
 @dataclass
 class KGRagState:
     graph: nx.Graph
-    node_ids: List[str]
-    node_embeddings: np.ndarray  # shape: (N, D), assumed L2-normalized
-    embedder: Embedder
-    triples: List[dict]
+    retriever: Any
     graph_path: Path
     cache_dir: Path
     incident_triples: Dict[str, List[dict]]
+    visible_node_ids: List[str]
 
 
 # ---- Graph loading & embedding ----------------------------------------------
@@ -707,7 +706,7 @@ def build_pyvis_html(graph_path: Path, height: str = "1000px", width: str = "100
           setStatus("Error: " + data.error);
           return;
         }
-        setStatus("Top nodes highlighted based on semantic similarity.");
+        setStatus("Hybrid KG retrieval completed and top nodes were highlighted.");
 
         // Save and show the global answer based on full top-N context
         kgResult.globalAnswer  = data.answer  || "";
@@ -724,7 +723,7 @@ def build_pyvis_html(graph_path: Path, height: str = "1000px", width: str = "100
           applyHighlightForCurrentResult();
           requestNodeExplain();  // this will now explain node 1 in terms of globalAnswer
         } else {
-          setStatus("No matching nodes in visible graph.");
+          setStatus("Retrieved KG context, but no ranked nodes are visible in the current graph view.");
         }
 
         if (data.context || data.answer){
@@ -804,27 +803,15 @@ def create_app(state: KGRagState) -> Flask:
         filtered_ids = extract_nodes_from_pyvis_html(html)
         if filtered_ids:
             print(f"[kg_rag_app] Filtered visible nodes: {len(filtered_ids)}")
-            state.node_ids = filtered_ids
-
-            state.node_embeddings = ensure_node_embeddings(
-                                       graph_path=state.graph_path,
-                                        node_ids=state.node_ids,
-                                        embedder=state.embedder,
-                                        cache_dir=state.cache_dir,
-                                        incident_triples=state.incident_triples
-                                    )
+            state.visible_node_ids = filtered_ids
         else:
             # this should not happen bc we only filter using --largest-only
-            print("[kg_rag_app] WARNING: no filtered nodes extracted; keeping original full node_ids")
+            print("[kg_rag_app] WARNING: no filtered nodes extracted; keeping full retriever node set")
 
         return html
 
     @app.route("/query", methods=["POST"])
     def query():
-        if state.node_embeddings is None:
-            return jsonify({
-                "error": "Embeddings not ready yet. Please reload the page."
-            }), 500
         try:
             payload = request.get_json(force=True) or {}
             question = payload.get("query", "").strip()
@@ -835,28 +822,25 @@ def create_app(state: KGRagState) -> Flask:
         if not question:
             return jsonify({"error": "Empty query."}), 400
 
-        # Embed query
         try:
-            q_vec = state.embedder.get_embedding([question]).astype("f")
-            # normalize
-            norms = np.linalg.norm(q_vec, axis=1, keepdims=True) + 1e-8
-            q_vec = q_vec / norms
+            result = state.retriever.query(
+                question=question,
+                top_k=top_n,
+                hop_limit=2,
+                visible_node_ids=state.visible_node_ids or None,
+            )
         except Exception as e:
-            return jsonify({"error": f"Embedding failed: {e}"}), 500
+            return jsonify({"error": f"Hybrid retrieval failed: {e}"}), 500
 
-        # Retrieve top nodes
-        top_nodes = cosine_top_k(q_vec[0], state.node_embeddings, state.node_ids, k=top_n)
-        node_payload = [{"id": nid, "score": score} for nid, score in top_nodes]
-        focus_ids = [nid for nid, _ in top_nodes]
-
-        # Build KG context and (optionally) LLM answer
-        context = build_llm_context(state.triples, focus_ids, max_triples=40)
-        answer = call_llm_answer(question, context)
+        answer = call_llm_answer(question, result.context)
 
         return jsonify({
-            "nodes": node_payload,
-            "context": context,
+            "nodes": result.focus_nodes,
+            "triples": result.triples,
+            "paths": result.paths,
+            "context": result.context,
             "answer": answer,
+            "debug_scores": result.debug_scores,
         })
 
     @app.route("/node_explain", methods=["POST"])
@@ -931,21 +915,24 @@ def main():
     if not graph_path.exists():
         raise SystemExit(f"[kg_rag_app] Graph file not found: {graph_path}")
 
-    G, node_ids, triples = load_graph(graph_path)
-    incident_triples = build_incident_triples(node_ids, triples)
-    
     embedder = Embedder(use_api="openai", model_name="text-embedding-3-small")
     cache_dir = Path(args.cache_dir)
-
-    state = KGRagState(
-        graph=G,
-        node_ids=node_ids,
-        node_embeddings=None, # updated during create_app
-        embedder=embedder,
-        triples=triples,
+    retriever = build_index(
         graph_path=graph_path,
         cache_dir=cache_dir,
-        incident_triples=incident_triples
+        text_embedder=embedder,
+        kge_enabled=True,
+    )
+    node_ids = [record["id"] for record in retriever.node_records]
+    incident_triples = build_incident_triples(node_ids, retriever.triples)
+
+    state = KGRagState(
+        graph=retriever.graph,
+        retriever=retriever,
+        graph_path=graph_path,
+        cache_dir=cache_dir,
+        incident_triples=incident_triples,
+        visible_node_ids=[],
     )
 
     app = create_app(state)

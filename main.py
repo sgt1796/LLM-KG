@@ -107,7 +107,7 @@ def main() -> None:
     elif args.ner == "openai":
         ner = LLMNER(client="openai", model="gpt-5-nano", temperature=1) # gpt 5 doesn't support temperature 0
     elif args.ner == "ollama":
-        ner = LLMNER(client="ollama", model="minstral", temperature=0.0)
+        ner = LLMNER(client="ollama", model="mistral:7b", temperature=0.0)
 
     interrupted = False
 
@@ -138,12 +138,42 @@ def main() -> None:
 
                     if isinstance(ner, NERExtractor):
                         sentence_entities = ner.extract(chunk_text)
+                        print(f"    Found {len(sentence_entities)} sentence(s) with entities.")
+                        ctx = DocContext(doc_id=doc_id, doc_meta=doc_meta, chunk_id=j-1, page_hint=None)
+                        kg_builder.build_from_sentences(sentence_entities, context=ctx, start_sentence_id=0)  # type: ignore[arg-type]
+                    elif isinstance(ner, LLMNER):
+                        chunk_sentences = ner.split_sentences(chunk_text)
+                        batches = list(ner.iter_sentence_batches(chunk_sentences))
+                        print(
+                            f"    Running staged LLM NER over {len(chunk_sentences)} sentence(s) "
+                            f"in {len(batches)} batch(es)."
+                        )
+
+                        ctx = DocContext(doc_id=doc_id, doc_meta=doc_meta, chunk_id=j-1, page_hint=None)
+                        entity_sentence_count = 0
+                        for batch_index, (batch_start, sentence_batch) in enumerate(batches, start=1):
+                            print(
+                                f"      LLM batch {batch_index}/{len(batches)}: "
+                                f"{len(sentence_batch)} sentence(s)."
+                            )
+                            sentence_entities = ner.extract_sentences(
+                                sentence_batch,
+                                mode="sentences",
+                                sentence_offset=batch_start,
+                            )
+                            entity_sentence_count += sum(1 for _, ents in sentence_entities if ents)
+                            kg_builder.build_from_sentences(
+                                sentence_entities,
+                                context=ctx,
+                                start_sentence_id=batch_start,
+                            )  # type: ignore[arg-type]
+
+                        print(f"    Found {entity_sentence_count} sentence(s) with entities.")
                     else:
                         sentence_entities = ner.extract(chunk_text, mode="sentences")  # type: ignore[attr-defined]
-
-                    print(f"    Found {len(sentence_entities)} sentence(s) with entities.")
-                    ctx = DocContext(doc_id=doc_id, doc_meta=doc_meta, chunk_id=j-1, page_hint=None)
-                    kg_builder.build_from_sentences(sentence_entities, context=ctx, start_sentence_id=0)  # type: ignore[arg-type]
+                        print(f"    Found {len(sentence_entities)} sentence(s) with entities.")
+                        ctx = DocContext(doc_id=doc_id, doc_meta=doc_meta, chunk_id=j-1, page_hint=None)
+                        kg_builder.build_from_sentences(sentence_entities, context=ctx, start_sentence_id=0)  # type: ignore[arg-type]
 
                 except KeyboardInterrupt:
                     print("    [INFO] Interrupted by user. Saving progress.", file=sys.stderr)

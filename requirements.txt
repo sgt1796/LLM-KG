@@ -81,3 +81,4 @@ wcwidth==0.2.14
 weasel==0.4.2
 websockets==15.0.1
 wrapt==2.0.1
+PyKEEN 

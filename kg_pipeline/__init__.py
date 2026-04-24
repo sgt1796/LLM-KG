@@ -23,6 +23,7 @@ from .triple_merger import TripletGraphMerger            # noqa: F401
 from .provenance import DocMeta, DocContext, Evidence, compute_doc_id  # noqa: F401
 # dynamic label store
 from .label_store import LabelStore  # noqa: F401
+from .rag import QueryResult, build_index, query  # noqa: F401
 
 __all__ = [
     "DataAcquisition",
@@ -40,4 +41,7 @@ __all__ = [
     "Evidence",
     "compute_doc_id",
     "LabelStore",
+    "QueryResult",
+    "build_index",
+    "query",
 ]
