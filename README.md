@@ -105,6 +105,36 @@ If you want to skip optional KGE training:
 python -m kg_pipeline.rag build --graph graph_llm.json --disable-kge
 ```
 
+## Docker Deployment
+
+The repo now includes a production-oriented `Dockerfile`,
+`docker-compose.yml`, `gunicorn.conf.py`, and `wsgi.py`.
+
+1. Copy `.env.example` to `.env` and set:
+   - `OPENAI_API_KEY`
+   - `KG_GRAPH_HOST_PATH`
+   - `KG_CACHE_HOST_PATH`
+2. Start the service:
+
+```bash
+docker compose up --build
+```
+
+Default URLs:
+
+- Web UI: `http://localhost:8000/`
+- Health check: `http://localhost:8000/healthz`
+- Agent search API: `POST http://localhost:8000/api/search`
+- Agent answer API: `POST http://localhost:8000/api/answer`
+
+Example agent search request:
+
+```bash
+curl -X POST http://localhost:8000/api/search \
+  -H "Content-Type: application/json" \
+  -d "{\"question\":\"What causes ASD?\",\"top_k\":5}"
+```
+
 ## Main extraction CLI
 
 `main.py` accepts a single PDF or a directory:

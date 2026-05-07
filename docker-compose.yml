@@ -1,0 +1,37 @@
+services:
+  kg-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: llm-kg:latest
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-8000}:8000"
+    environment:
+      PORT: "8000"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      KG_GRAPH_PATH: "${KG_GRAPH_CONTAINER_PATH:-/data/graph/graph.json}"
+      KG_CACHE_DIR: "${KG_CACHE_CONTAINER_PATH:-/data/cache}"
+      KG_OPENAI_EMBED_MODEL: "${KG_OPENAI_EMBED_MODEL:-text-embedding-3-small}"
+      KG_ENABLE_LLM_ANSWER: "${KG_ENABLE_LLM_ANSWER:-true}"
+      KG_KGE_ENABLED: "${KG_KGE_ENABLED:-false}"
+      WEB_CONCURRENCY: "${WEB_CONCURRENCY:-2}"
+      WEB_THREADS: "${WEB_THREADS:-4}"
+      WEB_TIMEOUT: "${WEB_TIMEOUT:-120}"
+      WEB_GRACEFUL_TIMEOUT: "${WEB_GRACEFUL_TIMEOUT:-30}"
+      WEB_KEEPALIVE: "${WEB_KEEPALIVE:-5}"
+    volumes:
+      - "${KG_GRAPH_HOST_PATH:-./GABA_graph.json}:${KG_GRAPH_CONTAINER_PATH:-/data/graph/graph.json}:ro"
+      - "${KG_CACHE_HOST_PATH:-./.kg_cache}:${KG_CACHE_CONTAINER_PATH:-/data/cache}"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz').read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s

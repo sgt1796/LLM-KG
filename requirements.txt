@@ -16,9 +16,11 @@ decorator==5.2.1
 distro==1.9.0
 executing==2.2.1
 filelock==3.20.0
+Flask==3.1.2
 fsspec==2025.10.0
 google-auth==2.43.0
 google-genai==1.49.0
+gunicorn==23.0.0
 h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
@@ -81,4 +83,3 @@ wcwidth==0.2.14
 weasel==0.4.2
 websockets==15.0.1
 wrapt==2.0.1
-PyKEEN 

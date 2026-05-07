@@ -26,9 +26,8 @@ import argparse
 import json
 import os
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 import sys, subprocess
 import re
 
@@ -56,6 +55,17 @@ class KGRagState:
     cache_dir: Path
     incident_triples: Dict[str, List[dict]]
     visible_node_ids: List[str]
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _llm_answer_enabled() -> bool:
+    return _env_bool("KG_ENABLE_LLM_ANSWER", True) and bool(os.getenv("OPENAI_API_KEY"))
 
 
 # ---- Graph loading & embedding ----------------------------------------------
@@ -108,6 +118,37 @@ def build_incident_triples(node_ids, triples):
         if t in incident:
             incident[t].append(tri)
     return incident
+
+
+def build_state(
+    graph_path: Path,
+    cache_dir: Path,
+    *,
+    embedder: Any | None = None,
+    kge_enabled: bool = True,
+    embed_model: str = "text-embedding-3-small",
+) -> KGRagState:
+    """Build app state once for both the UI and agent API routes."""
+
+    if embedder is None:
+        embedder = Embedder(use_api="openai", model_name=embed_model)
+
+    retriever = build_index(
+        graph_path=graph_path,
+        cache_dir=cache_dir,
+        text_embedder=embedder,
+        kge_enabled=kge_enabled,
+    )
+    node_ids = [record["id"] for record in retriever.node_records]
+    incident_triples = build_incident_triples(node_ids, retriever.triples)
+    return KGRagState(
+        graph=retriever.graph,
+        retriever=retriever,
+        graph_path=graph_path,
+        cache_dir=cache_dir,
+        incident_triples=incident_triples,
+        visible_node_ids=[],
+    )
 
 
 def build_node_text(node, incident_triples, max_triples=5):
@@ -266,6 +307,18 @@ def call_llm_answer(question: str, context: str) -> str:
 
     # IMPORTANT: return only the LLM answer, not context+answer.
     return result
+
+
+def maybe_call_llm_answer(question: str, context: str, *, enabled: bool = True) -> str:
+    """Best-effort LLM answer generation that can be disabled for deployments."""
+
+    if not enabled or not _llm_answer_enabled():
+        return ""
+    try:
+        return call_llm_answer(question, context)
+    except Exception as exc:
+        print(f"[kg_rag_app] WARNING: answer generation failed: {exc}")
+        return ""
 
 
 
@@ -790,7 +843,59 @@ def call_llm_node_explanation(
         node_context=node_context,
     )
 
+
+def maybe_call_llm_node_explanation(
+    question: str,
+    global_answer: str,
+    node_id: str,
+    node_context: str,
+    *,
+    enabled: bool = True,
+) -> str:
+    """Best-effort node explanation for hosted deployments."""
+
+    if not enabled or not _llm_answer_enabled():
+        return ""
+    try:
+        return call_llm_node_explanation(
+            question=question,
+            global_answer=global_answer,
+            node_id=node_id,
+            node_context=node_context,
+        )
+    except Exception as exc:
+        print(f"[kg_rag_app] WARNING: node explanation failed: {exc}")
+        return ""
+
 # ---- Flask app wiring -------------------------------------------------------
+
+
+def build_query_payload(
+    state: KGRagState,
+    *,
+    question: str,
+    top_n: int,
+    hop_limit: int = 2,
+    visible_node_ids: List[str] | None = None,
+    include_answer: bool = True,
+) -> Dict[str, Any]:
+    """Run retrieval and return a normalized JSON-ready payload."""
+
+    result = state.retriever.query(
+        question=question,
+        top_k=top_n,
+        hop_limit=hop_limit,
+        visible_node_ids=visible_node_ids,
+    )
+    answer = maybe_call_llm_answer(question, result.context, enabled=include_answer)
+    return {
+        "nodes": result.focus_nodes,
+        "triples": result.triples,
+        "paths": result.paths,
+        "context": result.context,
+        "answer": answer,
+        "debug_scores": result.debug_scores,
+    }
 
 
 def create_app(state: KGRagState) -> Flask:
@@ -810,12 +915,26 @@ def create_app(state: KGRagState) -> Flask:
 
         return html
 
+    @app.route("/healthz", methods=["GET"])
+    def healthz():
+        return jsonify(
+            {
+                "status": "ok",
+                "graph_path": str(state.graph_path),
+                "cache_dir": str(state.cache_dir),
+                "node_count": len(state.retriever.node_records),
+                "triple_count": len(state.retriever.triple_records),
+                "kge": state.retriever.kge.metadata,
+            }
+        )
+
     @app.route("/query", methods=["POST"])
     def query():
         try:
             payload = request.get_json(force=True) or {}
             question = payload.get("query", "").strip()
             top_n = int(payload.get("top_n", 15))
+            hop_limit = int(payload.get("hop_limit", 2))
         except Exception:
             return jsonify({"error": "Invalid JSON payload."}), 400
 
@@ -823,25 +942,85 @@ def create_app(state: KGRagState) -> Flask:
             return jsonify({"error": "Empty query."}), 400
 
         try:
-            result = state.retriever.query(
+            response_payload = build_query_payload(
+                state,
                 question=question,
-                top_k=top_n,
-                hop_limit=2,
+                top_n=top_n,
+                hop_limit=hop_limit,
                 visible_node_ids=state.visible_node_ids or None,
+                include_answer=True,
             )
         except Exception as e:
             return jsonify({"error": f"Hybrid retrieval failed: {e}"}), 500
 
-        answer = call_llm_answer(question, result.context)
+        return jsonify(response_payload)
 
-        return jsonify({
-            "nodes": result.focus_nodes,
-            "triples": result.triples,
-            "paths": result.paths,
-            "context": result.context,
+    @app.route("/api/search", methods=["POST"])
+    def api_search():
+        try:
+            payload = request.get_json(force=True) or {}
+            question = str(payload.get("query") or payload.get("question") or "").strip()
+            top_n = int(payload.get("top_k", payload.get("top_n", 10)))
+            hop_limit = int(payload.get("hop_limit", 2))
+            include_answer = bool(payload.get("include_answer", False))
+        except Exception:
+            return jsonify({"error": "Invalid JSON payload."}), 400
+
+        if not question:
+            return jsonify({"error": "Empty query."}), 400
+
+        try:
+            response_payload = build_query_payload(
+                state,
+                question=question,
+                top_n=top_n,
+                hop_limit=hop_limit,
+                visible_node_ids=None,
+                include_answer=include_answer,
+            )
+        except Exception as e:
+            return jsonify({"error": f"Hybrid retrieval failed: {e}"}), 500
+
+        return jsonify(response_payload)
+
+    @app.route("/api/answer", methods=["POST"])
+    def api_answer():
+        try:
+            payload = request.get_json(force=True) or {}
+            question = str(payload.get("query") or payload.get("question") or "").strip()
+            context = str(payload.get("context") or "").strip()
+            top_n = int(payload.get("top_k", payload.get("top_n", 10)))
+            hop_limit = int(payload.get("hop_limit", 2))
+        except Exception:
+            return jsonify({"error": "Invalid JSON payload."}), 400
+
+        if not question:
+            return jsonify({"error": "Empty query."}), 400
+
+        retrieval_payload: Dict[str, Any] | None = None
+        if not context:
+            try:
+                retrieval_payload = build_query_payload(
+                    state,
+                    question=question,
+                    top_n=top_n,
+                    hop_limit=hop_limit,
+                    visible_node_ids=None,
+                    include_answer=False,
+                )
+            except Exception as e:
+                return jsonify({"error": f"Hybrid retrieval failed: {e}"}), 500
+            context = retrieval_payload["context"]
+
+        answer = maybe_call_llm_answer(question, context, enabled=True)
+        response_payload = {
+            "question": question,
+            "context": context,
             "answer": answer,
-            "debug_scores": result.debug_scores,
-        })
+        }
+        if retrieval_payload is not None:
+            response_payload["retrieval"] = retrieval_payload
+        return jsonify(response_payload)
 
     @app.route("/node_explain", methods=["POST"])
     def node_explain():
@@ -870,11 +1049,12 @@ def create_app(state: KGRagState) -> Flask:
             max_triples=20,
         )
 
-        explanation = call_llm_node_explanation(
+        explanation = maybe_call_llm_node_explanation(
             question=question,
             global_answer=global_answer,
             node_id=node_id,
             node_context=context,
+            enabled=True,
         )
 
         return jsonify({
@@ -882,9 +1062,41 @@ def create_app(state: KGRagState) -> Flask:
             "context": context,        # local triples
             "explanation": explanation # per-node explanation
         })
+
+    @app.route("/api/node-explain", methods=["POST"])
+    def api_node_explain():
+        return node_explain()
     
 
     return app
+
+
+def create_app_from_env(
+    embedder_factory: Callable[[str], Any] | None = None,
+) -> Flask:
+    """Create the Flask app using environment variables for container deploys."""
+
+    graph_path = Path(os.getenv("KG_GRAPH_PATH", "graph.json"))
+    cache_dir = Path(os.getenv("KG_CACHE_DIR", ".kg_cache"))
+    embed_model = os.getenv("KG_OPENAI_EMBED_MODEL", "text-embedding-3-small")
+    kge_enabled = _env_bool("KG_KGE_ENABLED", True)
+
+    if not graph_path.exists():
+        raise SystemExit(f"[kg_rag_app] Graph file not found: {graph_path}")
+
+    if embedder_factory is None:
+        embedder = Embedder(use_api="openai", model_name=embed_model)
+    else:
+        embedder = embedder_factory(embed_model)
+
+    state = build_state(
+        graph_path=graph_path,
+        cache_dir=cache_dir,
+        embedder=embedder,
+        kge_enabled=kge_enabled,
+        embed_model=embed_model,
+    )
+    return create_app(state)
 
     
 # ---- CLI entrypoint ---------------------------------------------------------
@@ -894,10 +1106,21 @@ def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="KG-RAG demo server with pyvis highlighting.")
     ap.add_argument("--graph", type=str, default=None,
                     help="Path to graph JSON produced by main.py (triples format).")
-    ap.add_argument("--host", type=str, default="127.0.0.1")
-    ap.add_argument("--port", type=int, default=5000)
-    ap.add_argument("--cache-dir", type=str, default=".kg_cache",
+    ap.add_argument("--host", type=str, default=os.getenv("KG_HOST", "127.0.0.1"))
+    ap.add_argument("--port", type=int, default=int(os.getenv("PORT", "5000")))
+    ap.add_argument("--cache-dir", type=str, default=os.getenv("KG_CACHE_DIR", ".kg_cache"),
                     help="Directory to cache node embeddings.")
+    ap.add_argument(
+        "--disable-kge",
+        action="store_true",
+        help="Disable optional RotatE/PyKEEN graph-embedding artifacts.",
+    )
+    ap.add_argument(
+        "--embed-model",
+        type=str,
+        default=os.getenv("KG_OPENAI_EMBED_MODEL", "text-embedding-3-small"),
+        help="Embedding model name forwarded into Embedder.",
+    )
     return ap.parse_args()
 
 
@@ -915,24 +1138,13 @@ def main():
     if not graph_path.exists():
         raise SystemExit(f"[kg_rag_app] Graph file not found: {graph_path}")
 
-    embedder = Embedder(use_api="openai", model_name="text-embedding-3-small")
     cache_dir = Path(args.cache_dir)
-    retriever = build_index(
+    state = build_state(
         graph_path=graph_path,
         cache_dir=cache_dir,
-        text_embedder=embedder,
-        kge_enabled=True,
-    )
-    node_ids = [record["id"] for record in retriever.node_records]
-    incident_triples = build_incident_triples(node_ids, retriever.triples)
-
-    state = KGRagState(
-        graph=retriever.graph,
-        retriever=retriever,
-        graph_path=graph_path,
-        cache_dir=cache_dir,
-        incident_triples=incident_triples,
-        visible_node_ids=[],
+        embedder=Embedder(use_api="openai", model_name=args.embed_model),
+        kge_enabled=not args.disable_kge,
+        embed_model=args.embed_model,
     )
 
     app = create_app(state)

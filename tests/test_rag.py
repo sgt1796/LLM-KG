@@ -8,7 +8,7 @@ from unittest.mock import patch
 import numpy as np
 
 from kg_pipeline.rag import build_index
-from kg_rag_app import KGRagState, build_incident_triples, create_app
+from kg_rag_app import KGRagState, build_incident_triples, create_app, create_app_from_env
 
 
 def _tokenize(text: str) -> list[str]:
@@ -221,6 +221,59 @@ class FlaskRetrieverRegressionTests(unittest.TestCase):
             self.assertIn("paths", payload)
             self.assertTrue(payload["nodes"])
             self.assertIn(payload["nodes"][0]["id"], state.visible_node_ids)
+
+    def test_agent_api_search_returns_structured_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            graph_path = _write_graph(tmpdir)
+            retriever = build_index(graph_path, Path(tmpdir) / "cache", FakeEmbedder(), kge_enabled=False)
+            node_ids = [record["id"] for record in retriever.node_records]
+            state = KGRagState(
+                graph=retriever.graph,
+                retriever=retriever,
+                graph_path=graph_path,
+                cache_dir=Path(tmpdir) / "cache",
+                incident_triples=build_incident_triples(node_ids, retriever.triples),
+                visible_node_ids=node_ids,
+            )
+            app = create_app(state)
+            client = app.test_client()
+
+            response = client.post("/api/search", json={"question": "What causes ASD?", "top_k": 5})
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertIn("triples", payload)
+            self.assertIn("paths", payload)
+            self.assertIn("context", payload)
+            self.assertEqual(payload["triples"][0]["relation"], "causes")
+
+    def test_create_app_from_env_uses_graph_and_cache_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            graph_path = _write_graph(tmpdir)
+            cache_dir = Path(tmpdir) / "cache"
+
+            def fake_factory(model_name: str) -> FakeEmbedder:
+                self.assertEqual(model_name, "fake-model")
+                return FakeEmbedder()
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "KG_GRAPH_PATH": str(graph_path),
+                    "KG_CACHE_DIR": str(cache_dir),
+                    "KG_KGE_ENABLED": "false",
+                    "KG_OPENAI_EMBED_MODEL": "fake-model",
+                },
+                clear=False,
+            ):
+                app = create_app_from_env(embedder_factory=fake_factory)
+
+            client = app.test_client()
+            response = client.get("/healthz")
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload["graph_path"], str(graph_path))
+            self.assertEqual(payload["cache_dir"], str(cache_dir))
 
 
 if __name__ == "__main__":
