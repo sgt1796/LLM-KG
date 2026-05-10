@@ -528,10 +528,51 @@ def build_index(
     cache_dir: str | Path,
     text_embedder: Any,
     kge_enabled: bool = True,
-) -> HybridKGRetriever:
-    """Build or load deterministic sidecars for hybrid KG retrieval."""
+    *,
+    method: str = "hybrid",
+    semantic_threshold: float = 0.05,
+    structural_threshold: float = 0.05,
+) -> Any:
+    """Build or load deterministic sidecars for KG retrieval."""
+
+    return _build_index(
+        graph_path=graph_path,
+        cache_dir=cache_dir,
+        text_embedder=text_embedder,
+        kge_enabled=kge_enabled,
+        method=method,
+        semantic_threshold=semantic_threshold,
+        structural_threshold=structural_threshold,
+    )
+
+
+def _build_index(
+    graph_path: str | Path,
+    cache_dir: str | Path,
+    text_embedder: Any,
+    kge_enabled: bool = True,
+    *,
+    method: str = "hybrid",
+    semantic_threshold: float = 0.05,
+    structural_threshold: float = 0.05,
+) -> Any:
+    """Build or load deterministic sidecars for the selected retriever."""
 
     graph_path = Path(graph_path)
+    method_norm = str(method or "hybrid").strip().casefold()
+    if method_norm == "semantic":
+        from query_tools.semantic_subgraph_retriever import SemanticSubgraphRetriever
+
+        return SemanticSubgraphRetriever(
+            graph_path=graph_path,
+            cache_dir=Path(cache_dir) / graph_path.stem,
+            text_embedder=text_embedder,
+            semantic_threshold=semantic_threshold,
+            structural_threshold=structural_threshold,
+        )
+    if method_norm != "hybrid":
+        raise ValueError(f"Unknown retriever method: {method}")
+
     cache_dir = Path(cache_dir) / graph_path.stem
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -594,10 +635,10 @@ def query(
     top_k: int = 10,
     hop_limit: int = 2,
     *,
-    retriever: HybridKGRetriever,
+    retriever: Any,
     visible_node_ids: Optional[Iterable[str]] = None,
 ) -> QueryResult:
-    """Convenience wrapper around ``HybridKGRetriever.query``."""
+    """Convenience wrapper around a KG retriever's ``query`` method."""
 
     return retriever.query(question=question, top_k=top_k, hop_limit=hop_limit, visible_node_ids=visible_node_ids)
 
@@ -1142,13 +1183,16 @@ def _default_embedder(use_api: str = "openai", model_name: str = "text-embedding
 
 
 def _cli() -> int:
-    parser = argparse.ArgumentParser(description="Hybrid KG retriever")
+    parser = argparse.ArgumentParser(description="KG retriever")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     build_parser = subparsers.add_parser("build", help="Build cached retrieval sidecars")
     build_parser.add_argument("--graph", required=True, help="Path to graph JSON")
     build_parser.add_argument("--cache-dir", default=".kg_cache", help="Cache directory root")
+    build_parser.add_argument("--method", choices=("hybrid", "semantic"), default="hybrid", help="Retriever method")
     build_parser.add_argument("--disable-kge", action="store_true", help="Skip optional RotatE training")
+    build_parser.add_argument("--semantic-threshold", type=float, default=0.05, help="Semantic node filter threshold")
+    build_parser.add_argument("--structural-threshold", type=float, default=0.05, help="Structural node filter threshold")
 
     query_parser = subparsers.add_parser("query", help="Query a graph with natural language")
     query_parser.add_argument("--graph", required=True, help="Path to graph JSON")
@@ -1156,7 +1200,10 @@ def _cli() -> int:
     query_parser.add_argument("--question", required=True, help="Natural-language question")
     query_parser.add_argument("--top-k", type=int, default=10, help="Number of triples/nodes to return")
     query_parser.add_argument("--hop-limit", type=int, default=2, help="Maximum path hop count")
+    query_parser.add_argument("--method", choices=("hybrid", "semantic"), default="hybrid", help="Retriever method")
     query_parser.add_argument("--disable-kge", action="store_true", help="Skip optional RotatE training")
+    query_parser.add_argument("--semantic-threshold", type=float, default=0.05, help="Semantic node filter threshold")
+    query_parser.add_argument("--structural-threshold", type=float, default=0.05, help="Structural node filter threshold")
 
     args = parser.parse_args()
     embedder = _default_embedder()
@@ -1165,6 +1212,9 @@ def _cli() -> int:
         cache_dir=args.cache_dir,
         text_embedder=embedder,
         kge_enabled=not args.disable_kge,
+        method=args.method,
+        semantic_threshold=args.semantic_threshold,
+        structural_threshold=args.structural_threshold,
     )
 
     if args.command == "build":
@@ -1173,6 +1223,7 @@ def _cli() -> int:
                 {
                     "graph": str(Path(args.graph)),
                     "cache_dir": str(retriever.cache_dir),
+                    "method": getattr(retriever, "method", args.method),
                     "node_count": len(retriever.node_records),
                     "triple_count": len(retriever.triple_records),
                     "kge": retriever.kge.metadata,

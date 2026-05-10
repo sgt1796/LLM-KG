@@ -193,6 +193,27 @@ class HybridRetrieverTests(unittest.TestCase):
             self.assertEqual(result.triples[0]["subject"], "Melatonin")
             self.assertEqual(result.triples[0]["relation"], "treats")
 
+    def test_semantic_method_uses_project_schema_and_relation_lexicon(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            graph_path = _write_graph(tmpdir)
+            retriever = build_index(
+                graph_path,
+                Path(tmpdir) / "cache",
+                FakeEmbedder(),
+                kge_enabled=False,
+                method="semantic",
+            )
+
+            result = retriever.query("Autism Spectrum Disorder is treated with what?", top_k=5, hop_limit=2)
+
+            self.assertEqual(retriever.method, "semantic")
+            self.assertEqual(result.debug_scores["relation_intent"]["relation"], "treats")
+            self.assertEqual(result.debug_scores["relation_intent"]["direction"], -1)
+            self.assertEqual(result.triples[0]["subject"], "Melatonin")
+            self.assertEqual(result.triples[0]["relation"], "treats")
+            self.assertEqual(result.triples[0]["object"], "Autism Spectrum Disorder")
+            self.assertTrue(result.focus_nodes)
+
 
 class FlaskRetrieverRegressionTests(unittest.TestCase):
     def test_query_endpoint_returns_highlightable_focus_nodes_without_kge(self) -> None:

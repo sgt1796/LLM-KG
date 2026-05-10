@@ -30,6 +30,7 @@ entity extraction.
 - `kg_rag_app.py` now uses the retriever for `/query`, so app responses are grounded in ranked triples and paths rather than node-only cosine similarity.
 - The retriever writes per-graph cache sidecars under `.kg_cache/<graph_stem>/` for node, triple, relation, alias, and optional KGE artifacts.
 - Optional RotatE-style KGE support is implemented through `PyKEEN`; when `PyKEEN` is unavailable, retrieval cleanly falls back to text-only search.
+- `query_tools/SemanticSubgraphRetriever` adds a semantic subgraph query mode that reuses the project graph schema, canonical relation lexicon, cached embeddings, and Flask response contract.
 
 ## End-to-end workflow
 
@@ -86,6 +87,9 @@ Run the KG-RAG Flask app:
 python kg_rag_app.py --graph graph_llm.json --host 0.0.0.0 --port 5000
 ```
 
+To serve the semantic subgraph retriever in the app, pass
+`--retriever-method semantic` or set `KG_RETRIEVER_METHOD=semantic`.
+
 Build retriever caches from the command line:
 
 ```bash
@@ -97,6 +101,13 @@ Query the retriever directly from the command line:
 ```bash
 python -m kg_pipeline.rag query --graph graph_llm.json \
   --question "What causes ASD?" --top-k 10 --hop-limit 2
+```
+
+Use the semantic subgraph retriever instead of the default hybrid retriever:
+
+```bash
+python -m kg_pipeline.rag query --graph graph_llm.json \
+  --method semantic --question "What causes ASD?"
 ```
 
 If you want to skip optional KGE training:
@@ -195,6 +206,7 @@ Output is JSON with nodes and triples:
 ├── pyvis_view.py              # Interactive HTML visualization
 ├── kg_rag_app.py              # Flask KG-RAG demo app
 ├── kg_pipeline/rag.py         # Hybrid retriever + CLI
+├── query_tools/               # Semantic subgraph retriever option
 ├── Embedder.py                # Embedding wrapper (OpenAI/Jina/local)
 └── llm_utils/                 # POP + LLM client adapters
 ```

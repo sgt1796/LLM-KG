@@ -55,6 +55,7 @@ class KGRagState:
     cache_dir: Path
     incident_triples: Dict[str, List[dict]]
     visible_node_ids: List[str]
+    retriever_method: str = "hybrid"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -127,6 +128,9 @@ def build_state(
     embedder: Any | None = None,
     kge_enabled: bool = True,
     embed_model: str = "text-embedding-3-small",
+    retriever_method: str = "hybrid",
+    semantic_threshold: float = 0.05,
+    structural_threshold: float = 0.05,
 ) -> KGRagState:
     """Build app state once for both the UI and agent API routes."""
 
@@ -138,12 +142,16 @@ def build_state(
         cache_dir=cache_dir,
         text_embedder=embedder,
         kge_enabled=kge_enabled,
+        method=retriever_method,
+        semantic_threshold=semantic_threshold,
+        structural_threshold=structural_threshold,
     )
     node_ids = [record["id"] for record in retriever.node_records]
     incident_triples = build_incident_triples(node_ids, retriever.triples)
     return KGRagState(
         graph=retriever.graph,
         retriever=retriever,
+        retriever_method=getattr(retriever, "method", retriever_method),
         graph_path=graph_path,
         cache_dir=cache_dir,
         incident_triples=incident_triples,
@@ -922,6 +930,7 @@ def create_app(state: KGRagState) -> Flask:
                 "status": "ok",
                 "graph_path": str(state.graph_path),
                 "cache_dir": str(state.cache_dir),
+                "retriever_method": state.retriever_method,
                 "node_count": len(state.retriever.node_records),
                 "triple_count": len(state.retriever.triple_records),
                 "kge": state.retriever.kge.metadata,
@@ -951,7 +960,7 @@ def create_app(state: KGRagState) -> Flask:
                 include_answer=True,
             )
         except Exception as e:
-            return jsonify({"error": f"Hybrid retrieval failed: {e}"}), 500
+            return jsonify({"error": f"Retrieval failed: {e}"}), 500
 
         return jsonify(response_payload)
 
@@ -979,7 +988,7 @@ def create_app(state: KGRagState) -> Flask:
                 include_answer=include_answer,
             )
         except Exception as e:
-            return jsonify({"error": f"Hybrid retrieval failed: {e}"}), 500
+            return jsonify({"error": f"Retrieval failed: {e}"}), 500
 
         return jsonify(response_payload)
 
@@ -1009,7 +1018,7 @@ def create_app(state: KGRagState) -> Flask:
                     include_answer=False,
                 )
             except Exception as e:
-                return jsonify({"error": f"Hybrid retrieval failed: {e}"}), 500
+                return jsonify({"error": f"Retrieval failed: {e}"}), 500
             context = retrieval_payload["context"]
 
         answer = maybe_call_llm_answer(question, context, enabled=True)
@@ -1080,6 +1089,9 @@ def create_app_from_env(
     cache_dir = Path(os.getenv("KG_CACHE_DIR", ".kg_cache"))
     embed_model = os.getenv("KG_OPENAI_EMBED_MODEL", "text-embedding-3-small")
     kge_enabled = _env_bool("KG_KGE_ENABLED", True)
+    retriever_method = os.getenv("KG_RETRIEVER_METHOD", "hybrid")
+    semantic_threshold = float(os.getenv("KG_SEMANTIC_THRESHOLD", "0.05"))
+    structural_threshold = float(os.getenv("KG_STRUCTURAL_THRESHOLD", "0.05"))
 
     if not graph_path.exists():
         raise SystemExit(f"[kg_rag_app] Graph file not found: {graph_path}")
@@ -1095,6 +1107,9 @@ def create_app_from_env(
         embedder=embedder,
         kge_enabled=kge_enabled,
         embed_model=embed_model,
+        retriever_method=retriever_method,
+        semantic_threshold=semantic_threshold,
+        structural_threshold=structural_threshold,
     )
     return create_app(state)
 
@@ -1121,6 +1136,24 @@ def parse_args() -> argparse.Namespace:
         default=os.getenv("KG_OPENAI_EMBED_MODEL", "text-embedding-3-small"),
         help="Embedding model name forwarded into Embedder.",
     )
+    ap.add_argument(
+        "--retriever-method",
+        choices=("hybrid", "semantic"),
+        default=os.getenv("KG_RETRIEVER_METHOD", "hybrid"),
+        help="KG retrieval method.",
+    )
+    ap.add_argument(
+        "--semantic-threshold",
+        type=float,
+        default=float(os.getenv("KG_SEMANTIC_THRESHOLD", "0.05")),
+        help="Semantic node filter threshold for the semantic retriever.",
+    )
+    ap.add_argument(
+        "--structural-threshold",
+        type=float,
+        default=float(os.getenv("KG_STRUCTURAL_THRESHOLD", "0.05")),
+        help="Structural node filter threshold for the semantic retriever.",
+    )
     return ap.parse_args()
 
 
@@ -1145,10 +1178,16 @@ def main():
         embedder=Embedder(use_api="openai", model_name=args.embed_model),
         kge_enabled=not args.disable_kge,
         embed_model=args.embed_model,
+        retriever_method=args.retriever_method,
+        semantic_threshold=args.semantic_threshold,
+        structural_threshold=args.structural_threshold,
     )
 
     app = create_app(state)
-    print(f"[kg_rag_app] Serving KG-RAG demo on http://{args.host}:{args.port}  (graph={graph_path})")
+    print(
+        f"[kg_rag_app] Serving KG-RAG demo on http://{args.host}:{args.port} "
+        f"(graph={graph_path}, retriever={state.retriever_method})"
+    )
     app.run(host=args.host, port=args.port, debug=False)
 
 
