@@ -27,6 +27,19 @@ ap.add_argument("--width", default="100%")
 ap.add_argument("--directed", action="store_true", help="Render as directed graph")
 ap.add_argument("--select-menu", action="store_true", help="Enable pyvis select menu")
 ap.add_argument("--filter-menu", action="store_true", help="Enable pyvis filter menu")
+ap.add_argument("--config-ui", action="store_true", help="Enable pyvis live configuration UI")
+ap.add_argument(
+    "--config-sections",
+    default="physics,layout,interaction,nodes,edges",
+    help="Comma-separated pyvis configuration sections to expose when --config-ui is set.",
+)
+ap.add_argument("--theme", choices=["light", "dark"], default="light", help="Viewer color theme")
+ap.add_argument(
+    "--cdn-resources",
+    choices=["local", "remote", "in_line"],
+    default="local",
+    help="How pyvis should embed JavaScript/CSS assets.",
+)
 args = ap.parse_args()
 
 # ---------- Loader (supports nodes/edges, triples, JSONL) ----------
@@ -376,7 +389,35 @@ for u, v, data in G.edges(data=True):
 
 # ----- Render with pyvis -----
 # Build pyvis network
-net = Network(height=args.height, width=args.width, notebook=False, directed=args.directed, select_menu=args.select_menu, filter_menu=args.filter_menu)
+dark_theme = args.theme == "dark"
+bgcolor = "#050816" if dark_theme else "#ffffff"
+font_color = "#e5e7eb" if dark_theme else False
+node_font = {
+    "color": "#e5e7eb" if dark_theme else "#343434",
+    "size": 14,
+    "face": "arial",
+    "strokeWidth": 3 if dark_theme else 0,
+    "strokeColor": bgcolor,
+}
+edge_font = {
+    "color": "#cbd5e1" if dark_theme else "#343434",
+    "size": 12,
+    "face": "arial",
+    "align": "horizontal",
+    "strokeWidth": 3 if dark_theme else 0,
+    "strokeColor": bgcolor,
+}
+net = Network(
+    height=args.height,
+    width=args.width,
+    notebook=False,
+    directed=args.directed,
+    select_menu=args.select_menu,
+    filter_menu=args.filter_menu,
+    bgcolor=bgcolor,
+    font_color=font_color,
+    cdn_resources=args.cdn_resources,
+)
 net.barnes_hut()  # default; can be overridden below
 
 if args.physics == "false":
@@ -401,9 +442,50 @@ else:
         }
     }
 
+opts.setdefault("nodes", {})
+opts["nodes"]["font"] = node_font
+opts.setdefault("edges", {})
+opts["edges"]["font"] = edge_font
+
+if dark_theme:
+    opts["edges"]["color"] = {
+        "color": "rgba(148, 163, 184, 0.34)",
+        "highlight": "#facc15",
+        "hover": "#38bdf8",
+    }
+
+if args.config_ui:
+    config_sections = [part.strip() for part in args.config_sections.split(",") if part.strip()]
+    opts["configure"] = {"enabled": True}
+    if config_sections:
+        opts["configure"]["filter"] = config_sections
+    net.conf = True
+    net.widget = True
+
 net.set_options(json.dumps(opts))
 
 net.from_nx(G, edge_scaling=True)
+for node in net.nodes:
+    font = node.get("font")
+    if not isinstance(font, dict):
+        font = {}
+        node["font"] = font
+    for key, value in node_font.items():
+        font.setdefault(key, value)
+
+for edge in net.edges:
+    # PyVis converts NetworkX edge weights into vis-network "value" fields when
+    # edge_scaling=True. In vis-network 9.x that path can crash while scaling
+    # edge labels if an edge font option is absent. We already provide explicit
+    # widths above, so keep the width and avoid the fragile value-scaling pass.
+    edge.pop("value", None)
+    font = edge.get("font")
+    if not isinstance(font, dict):
+        font = {}
+        edge["font"] = font
+    for key, value in edge_font.items():
+        font.setdefault(key, value)
+
 # Avoid notebook template path issues by writing HTML directly
 net.write_html(args.html, open_browser=False)  # or: net.save_graph(args.html)
 print(f"Saved: {args.html}  | nodes={G.number_of_nodes()} edges={G.number_of_edges()}")

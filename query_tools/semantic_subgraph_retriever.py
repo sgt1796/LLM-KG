@@ -1,9 +1,10 @@
 """Semantic subgraph retriever adapted to the LLM-KG graph format.
 
-The implementation follows the semantic subgraph query shape from
-"From biomedical knowledge graph construction to semantic querying: a
-comprehensive approach", but it deliberately reuses this repository's own KG
-contracts:
+The implementation follows the ALEQ (Adaptive Locating and Expanding Query)
+semantic subgraph query shape from "From biomedical knowledge graph
+construction to semantic querying: a comprehensive approach"
+(Scientific Reports, 2025; https://www.nature.com/articles/s41598-025-93334-5),
+but it deliberately reuses this repository's own KG contracts:
 
 * graph JSON loading from ``kg_pipeline.rag``
 * canonical relation aliases from ``kg_pipeline.triple_builder``
@@ -66,7 +67,7 @@ class SemanticDebugScores:
 class SemanticSubgraphRetriever:
     """Retrieve query-relevant local subgraphs around semantic anchor nodes."""
 
-    method = "semantic"
+    method = "ALEQ"
 
     def __init__(
         self,
@@ -138,7 +139,7 @@ class SemanticSubgraphRetriever:
             metadata={
                 "status": "disabled",
                 "model": "semantic-subgraph",
-                "reason": "semantic retriever uses text and local graph structure only",
+                "reason": "ALEQ uses text and local graph structure only",
             },
             entity_embeddings=None,
             relation_embeddings=None,
@@ -369,15 +370,7 @@ class SemanticSubgraphRetriever:
                 score += 0.25
             scores[node_id] = float(score)
 
-        if scores:
-            return scores
-
-        fallback = _sorted_score_items(semantic_scores, limit=max(8, top_k * 2))
-        return {
-            node_id: float(score)
-            for node_id, score in fallback
-            if node_id != representative
-        }
+        return scores
 
     def _build_triple_payloads(
         self,
@@ -397,8 +390,7 @@ class SemanticSubgraphRetriever:
 
         triple_text_scores = self._triple_text_scores(query_vec)
         if not candidate_ids:
-            for triple_id, _ in _sorted_score_items(triple_text_scores, limit=max(top_k, 8)):
-                candidate_ids[int(triple_id)] = None
+            return []
 
         anchor_nodes = {str(anchor["node_id"]) for anchor in anchors}
         ranked: List[Tuple[float, Dict[str, Any]]] = []

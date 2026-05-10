@@ -41,7 +41,7 @@ load_dotenv()
 # ---- Import Embedder (your existing class) ---------------------------------
 
 from Embedder import Embedder  # type: ignore
-from kg_pipeline.rag import build_index
+from kg_pipeline.rag import RETRIEVER_METHOD_CHOICES, build_index, normalize_retriever_method
 from llm_utils.LLMClient import OpenAIClient  # type: ignore
 from llm_utils.POP import PromptFunction  # type: ignore
 # ---- Data structures --------------------------------------------------------
@@ -55,7 +55,8 @@ class KGRagState:
     cache_dir: Path
     incident_triples: Dict[str, List[dict]]
     visible_node_ids: List[str]
-    retriever_method: str = "hybrid"
+    retriever_method: str = "normal"
+    llm_enabled: bool = False
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -67,6 +68,20 @@ def _env_bool(name: str, default: bool) -> bool:
 
 def _llm_answer_enabled() -> bool:
     return _env_bool("KG_ENABLE_LLM_ANSWER", True) and bool(os.getenv("OPENAI_API_KEY"))
+
+
+def _llm_available() -> bool:
+    return bool(os.getenv("OPENAI_API_KEY"))
+
+
+def _resolve_llm_enabled(*, enable_llm: bool = False, disable_llm: bool = False) -> bool:
+    """Resolve final LLM behavior from CLI flags plus the environment default."""
+
+    if disable_llm:
+        return False
+    if enable_llm:
+        return _llm_available()
+    return _llm_answer_enabled()
 
 
 # ---- Graph loading & embedding ----------------------------------------------
@@ -128,9 +143,10 @@ def build_state(
     embedder: Any | None = None,
     kge_enabled: bool = True,
     embed_model: str = "text-embedding-3-small",
-    retriever_method: str = "hybrid",
+    retriever_method: str = "normal",
     semantic_threshold: float = 0.05,
     structural_threshold: float = 0.05,
+    llm_enabled: bool | None = None,
 ) -> KGRagState:
     """Build app state once for both the UI and agent API routes."""
 
@@ -151,11 +167,12 @@ def build_state(
     return KGRagState(
         graph=retriever.graph,
         retriever=retriever,
-        retriever_method=getattr(retriever, "method", retriever_method),
+        retriever_method=getattr(retriever, "method", normalize_retriever_method(retriever_method)),
         graph_path=graph_path,
         cache_dir=cache_dir,
         incident_triples=incident_triples,
         visible_node_ids=[],
+        llm_enabled=_llm_answer_enabled() if llm_enabled is None else bool(llm_enabled),
     )
 
 
@@ -320,7 +337,7 @@ def call_llm_answer(question: str, context: str) -> str:
 def maybe_call_llm_answer(question: str, context: str, *, enabled: bool = True) -> str:
     """Best-effort LLM answer generation that can be disabled for deployments."""
 
-    if not enabled or not _llm_answer_enabled():
+    if not enabled or not _llm_available():
         return ""
     try:
         return call_llm_answer(question, context)
@@ -345,6 +362,21 @@ def extract_nodes_from_pyvis_html(html: str) -> List[str]:
     # Convert JS → JSON (safe because pyvis outputs JSON-like dicts)
     nodes = json.loads(nodes_json)
     return [n["id"] for n in nodes]
+
+
+KG_RAG_INJECTION_TEMPLATE = Path(__file__).resolve().parent / "templates" / "kg_rag_injection.tmpl"
+
+
+def build_kg_rag_injection() -> str:
+    """Load the HTML/CSS/JS template that turns PyVis into a KG-RAG workbench."""
+
+    try:
+        return KG_RAG_INJECTION_TEMPLATE.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(
+            f"[kg_rag_app] KG-RAG injection template not found: {KG_RAG_INJECTION_TEMPLATE}"
+        ) from exc
+
 
 def build_pyvis_html(graph_path: Path, height: str = "1000px", width: str = "100%") -> str:
     """
@@ -377,7 +409,11 @@ def build_pyvis_html(graph_path: Path, height: str = "1000px", width: str = "100
         "--physics", "barnesHut",
         "--largest-only",
         "--directed",
-        #"--filter-menu",
+        "--select-menu",
+        "--filter-menu",
+        "--config-ui",
+        "--theme", "dark",
+        "--cdn-resources", "in_line",
     ]
 
     # Run pyvis_view to generate the HTML
@@ -393,427 +429,14 @@ def build_pyvis_html(graph_path: Path, height: str = "1000px", width: str = "100
     # Load the generated HTML
     html = html_path.read_text(encoding="utf-8")
 
-    # Inject the query bar just before </body>
-    injection = r"""
-<!-- KG-RAG query panel injection -->
-<div id="kg-rag-panel" style="
-  position: fixed;
-  top: 10px; left: 10px;
-  z-index: 9999;
-  background: rgba(0,0,0,0.75);
-  padding: 10px;
-  border-radius: 8px;
-  color: #fff;
-  max-width: 440px;
-  min-width: 220px;
-  min-height: 80px;
-  resize: both;
-  overflow: auto;
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  font-size: 13px;
-  box-shadow: 0 2px 16px rgba(0,0,0,0.25);
-  cursor: move;
-">
-  <div id="kg-rag-panel-header" style="font-weight: 600; margin-bottom: 6px; cursor: move; user-select: none;">
-    KG-RAG Demo
-  </div>
-  <div style="display:flex; gap:6px; margin-bottom:6px;">
-    <input id="kg-query-input" type="text" placeholder="Ask a question about the graph..."
-           style="flex:1; padding:4px 6px; border-radius:4px; border:0; font-size:13px;" />
-    <button id="kg-query-btn" style="
-        padding:4px 10px;
-        border-radius:999px;
-        border:0;
-        background:#ffcc00;
-        color:#000;
-        font-weight:600;
-        cursor:pointer;
-    ">Ask</button>
-  </div>
-  <div id="kg-query-status" style="font-size:11px; opacity:0.8; margin-bottom:4px;"></div>
-
-  <!-- Global answer area -->
-  <div id="kg-global-answer-box" style="
-        margin-bottom:6px;
-        padding:6px 8px;
-        border-radius:4px;
-        background:rgba(0,0,0,0.35);
-        font-size:12px;
-        max-height:120px;
-        overflow:auto;
-  ">
-    <div style="font-size:11px; opacity:0.8; margin-bottom:2px;">
-      Overall answer (top-N context)
-    </div>
-    <div id="kg-global-answer" style="white-space:pre-wrap;"></div>
-  </div>
-
-  <!-- Node pager for switching among top-N nodes -->
-  <div id="kg-node-pager" style="
-        display:none;
-        align-items:center;
-        gap:6px;
-        margin-bottom:4px;
-        font-size:11px;
-  ">
-    <button id="kg-prev-node" style="
-        padding:2px 6px;
-        border-radius:999px;
-        border:0;
-        background:#444;
-        color:#fff;
-        cursor:pointer;
-    ">◀</button>
-    <span id="kg-node-label" style="flex:1; opacity:0.9;"></span>
-    <button id="kg-next-node" style="
-        padding:2px 6px;
-        border-radius:999px;
-        border:0;
-        background:#444;
-        color:#fff;
-        cursor:pointer;
-    ">▶</button>
-  </div>
-
-  <div id="kg-answer" style="
-            max-height: 220px;
-            overflow:auto;
-            padding:6px 8px;
-            border-radius:4px;
-            background:rgba(0,0,0,0.4);
-            font-size:12px;
-    ">
-        <div style="font-size:11px; opacity:0.8; margin-bottom:2px;">
-        Context triples
-        </div>
-        <pre id="kg-context" style="
-            margin:0 0 4px 0;
-            font-family:inherit;
-            white-space:pre-wrap;
-        "></pre>
-
-        <div style="
-            font-size:11px;
-            opacity:0.8;
-            margin-top:4px;
-            margin-bottom:2px;
-            border-top:1px solid rgba(255,255,255,0.2);
-            padding-top:4px;
-        ">
-        AI explanation
-        </div>
-        <div id="kg-ai-answer" style="white-space:pre-wrap;"></div>
-    </div>
-    </div>
-    <pre id="kg-context" style="
-          margin:0 0 4px 0;
-          font-family:inherit;
-          white-space:pre-wrap;
-    "></pre>
-
-    <div style="
-          font-size:11px;
-          opacity:0.8;
-          margin-top:4px;
-          margin-bottom:2px;
-          border-top:1px solid rgba(255,255,255,0.2);
-          padding-top:4px;
-    ">
-      AI explanation
-    </div>
-    <div id="kg-ai-answer" style="white-space:pre-wrap;"></div>
-  </div>
-</div>
-
-<script type="text/javascript">
-// --- Draggable and resizable panel ---
-(function(){
-  var panel = document.getElementById('kg-rag-panel');
-  var header = document.getElementById('kg-rag-panel-header');
-  var isDragging = false, dragOffsetX = 0, dragOffsetY = 0;
-  if (panel && header) {
-    header.addEventListener('mousedown', function(e) {
-      isDragging = true;
-      dragOffsetX = e.clientX - panel.offsetLeft;
-      dragOffsetY = e.clientY - panel.offsetTop;
-      document.body.style.userSelect = 'none';
-    });
-    document.addEventListener('mousemove', function(e) {
-      if (isDragging) {
-        panel.style.left = (e.clientX - dragOffsetX) + 'px';
-        panel.style.top = (e.clientY - dragOffsetY) + 'px';
-      }
-    });
-    document.addEventListener('mouseup', function(e) {
-      isDragging = false;
-      document.body.style.userSelect = '';
-    });
-  }
-  // State for current query results
-  var kgResult = {
-    nodes: [],              // [{id, score}, ...]
-    currentIndex: 0,
-    highlightedEdgeIds: [], // edges we modified
-    edgeOriginalStyles: {}, // id -> {color, width}
-    lastQuery: "",          // remember current question
-    globalAnswer: ""        // overall answer from top-N context
-  };
-
-
-  function ensureVisObjects(cb, retries){
-    retries = retries || 20;
-    if (typeof network !== 'undefined' && typeof nodes !== 'undefined' && typeof edges !== 'undefined') {
-      cb();
-      return;
-    }
-    if (retries <= 0) return;
-    setTimeout(function(){ ensureVisObjects(cb, retries-1); }, 200);
-  }
-
-  function setStatus(msg){
-    var el = document.getElementById("kg-query-status");
-    if (el) el.textContent = msg || "";
-  }
-
-  function setAnswer(ctx, ans){
-    var ctxEl = document.getElementById("kg-context");
-    var ansEl = document.getElementById("kg-ai-answer");
-    if (ctxEl) ctxEl.textContent = ctx || "";
-    if (ansEl) ansEl.textContent = ans || "";
-  }
-  function setGlobalAnswer(ans){
-    var el = document.getElementById("kg-global-answer");
-    if (el) el.textContent = ans || "";
-  }
-  function updateNodePager(){
-    var pager = document.getElementById("kg-node-pager");
-    var label = document.getElementById("kg-node-label");
-    if (!pager || !label) return;
-
-    if (!kgResult.nodes.length){
-      pager.style.display = "none";
-      label.textContent = "";
-      return;
-    }
-
-    pager.style.display = "flex";
-    var idx = kgResult.currentIndex;
-    if (idx < 0) idx = 0;
-    if (idx >= kgResult.nodes.length) idx = kgResult.nodes.length - 1;
-    var node = kgResult.nodes[idx];
-    label.textContent = (idx+1) + "/" + kgResult.nodes.length + "  " + node.id + "  (score=" + node.score.toFixed(3) + ")";
-  }
-
-  function resetHighlightedEdges(){
-    if (!kgResult.highlightedEdgeIds.length) return;
-    var updates = [];
-    kgResult.highlightedEdgeIds.forEach(function(eid){
-      var orig = kgResult.edgeOriginalStyles[eid];
-      if (!orig) return;
-      var u = { id: eid };
-      if (orig.color !== undefined) u.color = orig.color;
-      if (orig.width !== undefined) u.width = orig.width;
-      updates.push(u);
-    });
-    if (updates.length) edges.update(updates);
-    kgResult.highlightedEdgeIds = [];
-  }
-
-  function highlightEdgesBetweenSelected(selectedIds){
-    var selectedSet = {};
-    selectedIds.forEach(function(id){ selectedSet[id] = true; });
-
-    var es = edges.get();
-    var updates = [];
-
-    es.forEach(function(e){
-      var from = e.from, to = e.to;
-      if (selectedSet[from] && selectedSet[to]){
-        // store original once
-        if (!kgResult.edgeOriginalStyles[e.id]){
-          kgResult.edgeOriginalStyles[e.id] = {
-            color: e.color || undefined,
-            width: e.width || undefined
-          };
-        }
-        updates.push({
-          id: e.id,
-          color: { color: "#ffcc00" },
-          width: (e.width || 1) + 2
-        });
-        kgResult.highlightedEdgeIds.push(e.id);
-      }
-    });
-
-    if (updates.length) edges.update(updates);
-  }
-
-  function applyHighlightForCurrentResult(){
-    if (!kgResult.nodes.length) return;
-
-    // reset edge styles from previous query
-    resetHighlightedEdges();
-
-    var ids = kgResult.nodes.map(function(n){ return n.id; });
-    if (!ids.length) return;
-
-    // Select all result nodes (vis.js will already emphasize neighbors)
-    network.unselectAll();
-    network.selectNodes(ids, true);
-
-    // Focus on the "current" node in pager
-    var idx = kgResult.currentIndex;
-    if (idx < 0) idx = 0;
-    if (idx >= kgResult.nodes.length) idx = kgResult.nodes.length - 1;
-    kgResult.currentIndex = idx;
-    var currentId = kgResult.nodes[idx].id;
-    network.focus(currentId, { scale: 1.6, animation: true });
-
-    // Explicitly boost edges connecting nodes in the top-N set
-    highlightEdgesBetweenSelected(ids);
-
-    updateNodePager();
-  }
-  
-  function requestNodeExplain(){
-    if (!kgResult.nodes.length) return;
-
-    var idx = kgResult.currentIndex;
-    if (idx < 0 || idx >= kgResult.nodes.length) return;
-
-    var node = kgResult.nodes[idx];
-    var q = kgResult.lastQuery || "";
-    if (!q) {
-      // If for some reason we lost the query, try reading from the input
-      var input = document.getElementById("kg-query-input");
-      if (input) q = input.value.trim();
-    }
-    if (!q) return;
-
-    setStatus('Explaining why node "' + node.id + '" is relevant...');
-
-    fetch("/node_explain", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        query: q,
-        node_id: node.id,
-        global_answer: kgResult.globalAnswer   // NEW
-      })
-    })
-    .then(function(res){ return res.json(); })
-    .then(function(data){
-      if (data.error){
-        setStatus("Error: " + data.error);
-        return;
-      }
-      setStatus('Node "' + node.id + '" explanation loaded.');
-      // Node area: local triples + node contribution explanation
-      setAnswer(data.context || "", data.explanation || "");
-    })
-    .catch(function(err){
-      console.error(err);
-      setStatus("Node explanation failed; see console for details.");
-    });
-  }
-
-  function showNodeAt(index){
-    if (!kgResult.nodes.length) return;
-    if (index < 0) index = 0;
-    if (index >= kgResult.nodes.length) index = kgResult.nodes.length - 1;
-    kgResult.currentIndex = index;
-    applyHighlightForCurrentResult();
-    requestNodeExplain();   // now update context+answer for this single node
-  }
-
-  function attachHandlers(){
-    var btn = document.getElementById("kg-query-btn");
-    var input = document.getElementById("kg-query-input");
-    var prevBtn = document.getElementById("kg-prev-node");
-    var nextBtn = document.getElementById("kg-next-node");
-
-    if (!btn || !input) return;
-
-    if (prevBtn){
-      prevBtn.addEventListener("click", function(){
-        showNodeAt(kgResult.currentIndex - 1);
-      });
-    }
-    if (nextBtn){
-      nextBtn.addEventListener("click", function(){
-        showNodeAt(kgResult.currentIndex + 1);
-      });
-    }
-
-    function sendQuery(){
-      var q = input.value.trim();
-      if (!q) return;
-      setStatus("Querying KG-RAG backend...");
-      setAnswer("", "");          // clear context + answer
-      // clear previous state
-      kgResult.nodes = [];
-      kgResult.lastQuery = q;     // remember question
-      resetHighlightedEdges();
-      updateNodePager();
-
-      fetch("/query", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({query: q, top_n: 15})
-      })
-      .then(function(res){ return res.json(); })
-      .then(function(data){
-        if (data.error){
-          setStatus("Error: " + data.error);
-          return;
-        }
-        setStatus("Hybrid KG retrieval completed and top nodes were highlighted.");
-
-        // Save and show the global answer based on full top-N context
-        kgResult.globalAnswer  = data.answer  || "";
-        kgResult.globalContext = data.context || "";
-        setGlobalAnswer(kgResult.globalAnswer);
-
-        // (Optional) show the global context in the per-node area before any node is selected
-        if (data.context || data.answer){
-          setAnswer(data.context || "", data.answer || "");
-        }
-        if (Array.isArray(data.nodes) && data.nodes.length){
-          kgResult.nodes = data.nodes;
-          kgResult.currentIndex = 0;
-          applyHighlightForCurrentResult();
-          requestNodeExplain();  // this will now explain node 1 in terms of globalAnswer
-        } else {
-          setStatus("Retrieved KG context, but no ranked nodes are visible in the current graph view.");
-        }
-
-        if (data.context || data.answer){
-          setAnswer(data.context || "", data.answer || "");
-        }
-      })
-      .catch(function(err){
-        console.error(err);
-        setStatus("Request failed; see console for details.");
-      });
-    }
-
-    btn.addEventListener("click", sendQuery);
-    input.addEventListener("keydown", function(ev){
-      if (ev.key === "Enter") sendQuery();
-    });
-  }
-
-  ensureVisObjects(attachHandlers, 30);
-})();
-</script>
-"""
-
+    injection = build_kg_rag_injection()
     if "</body>" in html:
         html = html.replace("</body>", injection + "\n</body>")
     else:
         html = html + injection
 
     return html
+
 
 def call_llm_node_explanation(
     question: str,
@@ -840,7 +463,7 @@ def call_llm_node_explanation(
             "help support, refine, or challenge the overall answer above. "
             "If the node is only weakly or indirectly related, say that explicitly."
         ),
-        client='openai',
+        client=OpenAIClient(),
     )
     return ai.execute(
         model="gpt-5.1",
@@ -862,7 +485,7 @@ def maybe_call_llm_node_explanation(
 ) -> str:
     """Best-effort node explanation for hosted deployments."""
 
-    if not enabled or not _llm_answer_enabled():
+    if not enabled or not _llm_available():
         return ""
     try:
         return call_llm_node_explanation(
@@ -874,6 +497,69 @@ def maybe_call_llm_node_explanation(
     except Exception as exc:
         print(f"[kg_rag_app] WARNING: node explanation failed: {exc}")
         return ""
+
+
+def build_highlight_payload(result: Any) -> Dict[str, Any]:
+    """Return graph-highlight metadata derived from a retriever result."""
+
+    node_scores: Dict[str, float] = {}
+    ranked_node_ids: List[str] = []
+    for node in result.focus_nodes:
+        node_id = str(node.get("id", "")).strip()
+        if not node_id:
+            continue
+        node_scores[node_id] = float(node.get("score", 0.0) or 0.0)
+        ranked_node_ids.append(node_id)
+
+    evidence_edges: List[Dict[str, Any]] = []
+    highlight_node_ids = set(ranked_node_ids)
+    for rank, triple in enumerate(result.triples, start=1):
+        subject = str(triple.get("subject", "")).strip()
+        obj = str(triple.get("object", "")).strip()
+        if not subject or not obj:
+            continue
+        relation = str(triple.get("relation", "")).strip()
+        highlight_node_ids.update([subject, obj])
+        evidence_edges.append(
+            {
+                "from": subject,
+                "to": obj,
+                "relation": relation,
+                "triple_id": str(triple.get("id", "")),
+                "rank": rank,
+                "score": float(triple.get("score", 0.0) or 0.0),
+                "weight": float(triple.get("weight", 0.0) or 0.0),
+                "kind": "triple",
+            }
+        )
+
+    path_edges: List[Dict[str, Any]] = []
+    for path_rank, path in enumerate(result.paths, start=1):
+        for edge in path.get("edges", []) or []:
+            subject = str(edge.get("subject", "")).strip()
+            obj = str(edge.get("object", "")).strip()
+            if not subject or not obj:
+                continue
+            relation = str(edge.get("relation", "")).strip()
+            highlight_node_ids.update([subject, obj])
+            path_edges.append(
+                {
+                    "from": subject,
+                    "to": obj,
+                    "relation": relation,
+                    "triple_id": str(edge.get("triple_id", "")),
+                    "rank": path_rank,
+                    "kind": "path",
+                }
+            )
+
+    return {
+        "node_ids": sorted(highlight_node_ids, key=lambda item: item.casefold()),
+        "ranked_node_ids": ranked_node_ids,
+        "node_scores": node_scores,
+        "edges": evidence_edges,
+        "path_edges": path_edges,
+    }
 
 # ---- Flask app wiring -------------------------------------------------------
 
@@ -902,6 +588,9 @@ def build_query_payload(
         "paths": result.paths,
         "context": result.context,
         "answer": answer,
+        "llm_enabled": bool(include_answer and state.llm_enabled),
+        "llm_available": _llm_available(),
+        "highlight": build_highlight_payload(result),
         "debug_scores": result.debug_scores,
     }
 
@@ -931,6 +620,8 @@ def create_app(state: KGRagState) -> Flask:
                 "graph_path": str(state.graph_path),
                 "cache_dir": str(state.cache_dir),
                 "retriever_method": state.retriever_method,
+                "llm_enabled": state.llm_enabled,
+                "llm_available": _llm_available(),
                 "node_count": len(state.retriever.node_records),
                 "triple_count": len(state.retriever.triple_records),
                 "kge": state.retriever.kge.metadata,
@@ -944,6 +635,7 @@ def create_app(state: KGRagState) -> Flask:
             question = payload.get("query", "").strip()
             top_n = int(payload.get("top_n", 15))
             hop_limit = int(payload.get("hop_limit", 2))
+            include_answer = bool(payload.get("include_answer", True)) and state.llm_enabled
         except Exception:
             return jsonify({"error": "Invalid JSON payload."}), 400
 
@@ -957,7 +649,7 @@ def create_app(state: KGRagState) -> Flask:
                 top_n=top_n,
                 hop_limit=hop_limit,
                 visible_node_ids=state.visible_node_ids or None,
-                include_answer=True,
+                include_answer=include_answer,
             )
         except Exception as e:
             return jsonify({"error": f"Retrieval failed: {e}"}), 500
@@ -971,7 +663,7 @@ def create_app(state: KGRagState) -> Flask:
             question = str(payload.get("query") or payload.get("question") or "").strip()
             top_n = int(payload.get("top_k", payload.get("top_n", 10)))
             hop_limit = int(payload.get("hop_limit", 2))
-            include_answer = bool(payload.get("include_answer", False))
+            include_answer = bool(payload.get("include_answer", False)) and state.llm_enabled
         except Exception:
             return jsonify({"error": "Invalid JSON payload."}), 400
 
@@ -1021,7 +713,7 @@ def create_app(state: KGRagState) -> Flask:
                 return jsonify({"error": f"Retrieval failed: {e}"}), 500
             context = retrieval_payload["context"]
 
-        answer = maybe_call_llm_answer(question, context, enabled=True)
+        answer = maybe_call_llm_answer(question, context, enabled=state.llm_enabled)
         response_payload = {
             "question": question,
             "context": context,
@@ -1043,6 +735,7 @@ def create_app(state: KGRagState) -> Flask:
             question = (payload.get("query") or "").strip()
             node_id = str(payload.get("node_id") or "").strip()
             global_answer = (payload.get("global_answer") or "").strip()
+            include_explanation = bool(payload.get("include_explanation", True)) and state.llm_enabled
         except Exception:
             return jsonify({"error": "Invalid JSON payload."}), 400
 
@@ -1063,13 +756,15 @@ def create_app(state: KGRagState) -> Flask:
             global_answer=global_answer,
             node_id=node_id,
             node_context=context,
-            enabled=True,
+            enabled=include_explanation,
         )
 
         return jsonify({
             "node_id": node_id,
             "context": context,        # local triples
-            "explanation": explanation # per-node explanation
+            "explanation": explanation, # per-node explanation
+            "llm_enabled": include_explanation,
+            "llm_available": _llm_available(),
         })
 
     @app.route("/api/node-explain", methods=["POST"])
@@ -1089,9 +784,10 @@ def create_app_from_env(
     cache_dir = Path(os.getenv("KG_CACHE_DIR", ".kg_cache"))
     embed_model = os.getenv("KG_OPENAI_EMBED_MODEL", "text-embedding-3-small")
     kge_enabled = _env_bool("KG_KGE_ENABLED", True)
-    retriever_method = os.getenv("KG_RETRIEVER_METHOD", "hybrid")
+    retriever_method = normalize_retriever_method(os.getenv("KG_RETRIEVER_METHOD", "normal"))
     semantic_threshold = float(os.getenv("KG_SEMANTIC_THRESHOLD", "0.05"))
     structural_threshold = float(os.getenv("KG_STRUCTURAL_THRESHOLD", "0.05"))
+    llm_enabled = _resolve_llm_enabled()
 
     if not graph_path.exists():
         raise SystemExit(f"[kg_rag_app] Graph file not found: {graph_path}")
@@ -1110,6 +806,7 @@ def create_app_from_env(
         retriever_method=retriever_method,
         semantic_threshold=semantic_threshold,
         structural_threshold=structural_threshold,
+        llm_enabled=llm_enabled,
     )
     return create_app(state)
 
@@ -1138,21 +835,37 @@ def parse_args() -> argparse.Namespace:
     )
     ap.add_argument(
         "--retriever-method",
-        choices=("hybrid", "semantic"),
-        default=os.getenv("KG_RETRIEVER_METHOD", "hybrid"),
-        help="KG retrieval method.",
+        type=normalize_retriever_method,
+        choices=RETRIEVER_METHOD_CHOICES,
+        default=normalize_retriever_method(os.getenv("KG_RETRIEVER_METHOD", "normal")),
+        metavar="{normal,ALEQ}",
+        help=(
+            "KG retrieval method: normal is the default project retriever; "
+            "ALEQ is Adaptive Locating and Expanding Query."
+        ),
     )
     ap.add_argument(
         "--semantic-threshold",
         type=float,
         default=float(os.getenv("KG_SEMANTIC_THRESHOLD", "0.05")),
-        help="Semantic node filter threshold for the semantic retriever.",
+        help="Semantic node filter threshold for the ALEQ retriever.",
     )
     ap.add_argument(
         "--structural-threshold",
         type=float,
         default=float(os.getenv("KG_STRUCTURAL_THRESHOLD", "0.05")),
-        help="Structural node filter threshold for the semantic retriever.",
+        help="Structural node filter threshold for the ALEQ retriever.",
+    )
+    llm_group = ap.add_mutually_exclusive_group()
+    llm_group.add_argument(
+        "--enable-llm",
+        action="store_true",
+        help="Enable LLM answers and node explanations when OPENAI_API_KEY is set.",
+    )
+    llm_group.add_argument(
+        "--disable-llm",
+        action="store_true",
+        help="Disable LLM answers and node explanations.",
     )
     return ap.parse_args()
 
@@ -1172,6 +885,10 @@ def main():
         raise SystemExit(f"[kg_rag_app] Graph file not found: {graph_path}")
 
     cache_dir = Path(args.cache_dir)
+    llm_enabled = _resolve_llm_enabled(enable_llm=args.enable_llm, disable_llm=args.disable_llm)
+    if args.enable_llm and not _llm_available():
+        print("[kg_rag_app] WARNING: --enable-llm was set, but OPENAI_API_KEY is not available.")
+
     state = build_state(
         graph_path=graph_path,
         cache_dir=cache_dir,
@@ -1181,12 +898,13 @@ def main():
         retriever_method=args.retriever_method,
         semantic_threshold=args.semantic_threshold,
         structural_threshold=args.structural_threshold,
+        llm_enabled=llm_enabled,
     )
 
     app = create_app(state)
     print(
         f"[kg_rag_app] Serving KG-RAG demo on http://{args.host}:{args.port} "
-        f"(graph={graph_path}, retriever={state.retriever_method})"
+        f"(graph={graph_path}, retriever={state.retriever_method}, llm={'on' if state.llm_enabled else 'off'})"
     )
     app.run(host=args.host, port=args.port, debug=False)
 

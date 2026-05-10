@@ -28,6 +28,18 @@ RRF_K = 60
 MIN_TRIPLE_CANDIDATES = 8
 TOP_TEXT_CANDIDATES = 64
 RELATION_EMBED_THRESHOLD = 0.25
+RETRIEVER_METHOD_CHOICES = ("normal", "ALEQ")
+
+
+def normalize_retriever_method(method: str | None) -> str:
+    """Normalize public retriever method names and legacy aliases."""
+
+    method_norm = str(method or "normal").strip().casefold()
+    if method_norm in {"normal", "hybrid"}:
+        return "normal"
+    if method_norm in {"aleq", "semantic"}:
+        return "ALEQ"
+    raise ValueError(f"Unknown retriever method: {method}")
 
 
 @dataclass
@@ -67,7 +79,7 @@ class KGEArtifacts:
 
 @dataclass
 class HybridKGRetriever:
-    """Reusable hybrid retriever with offline indices and runtime search."""
+    """Reusable normal retriever with offline indices and runtime search."""
 
     graph_path: Path
     cache_dir: Path
@@ -86,6 +98,7 @@ class HybridKGRetriever:
     alias_patterns: List[Tuple[str, re.Pattern[str], List[str]]]
     relation_patterns: List[Tuple[str, re.Pattern[str], str, int]]
     kge: KGEArtifacts
+    method: str = "normal"
 
     def query(
         self,
@@ -529,7 +542,7 @@ def build_index(
     text_embedder: Any,
     kge_enabled: bool = True,
     *,
-    method: str = "hybrid",
+    method: str = "normal",
     semantic_threshold: float = 0.05,
     structural_threshold: float = 0.05,
 ) -> Any:
@@ -552,15 +565,15 @@ def _build_index(
     text_embedder: Any,
     kge_enabled: bool = True,
     *,
-    method: str = "hybrid",
+    method: str = "normal",
     semantic_threshold: float = 0.05,
     structural_threshold: float = 0.05,
 ) -> Any:
     """Build or load deterministic sidecars for the selected retriever."""
 
     graph_path = Path(graph_path)
-    method_norm = str(method or "hybrid").strip().casefold()
-    if method_norm == "semantic":
+    method_norm = normalize_retriever_method(method)
+    if method_norm == "ALEQ":
         from query_tools.semantic_subgraph_retriever import SemanticSubgraphRetriever
 
         return SemanticSubgraphRetriever(
@@ -570,9 +583,6 @@ def _build_index(
             semantic_threshold=semantic_threshold,
             structural_threshold=structural_threshold,
         )
-    if method_norm != "hybrid":
-        raise ValueError(f"Unknown retriever method: {method}")
-
     cache_dir = Path(cache_dir) / graph_path.stem
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1139,7 +1149,11 @@ def _generate_aliases(node_id: str) -> List[str]:
     if alnum:
         aliases.add(alnum.casefold())
 
-    tokens = re.findall(r"[A-Za-z0-9]+", str(node_id))
+    tokens = [
+        token
+        for token in re.findall(r"[A-Za-z0-9]+", str(node_id))
+        if token.casefold() != "s"
+    ]
     if len(tokens) >= 2:
         acronym = "".join(token[0] for token in tokens if token)
         if len(acronym) >= 2:
@@ -1189,10 +1203,20 @@ def _cli() -> int:
     build_parser = subparsers.add_parser("build", help="Build cached retrieval sidecars")
     build_parser.add_argument("--graph", required=True, help="Path to graph JSON")
     build_parser.add_argument("--cache-dir", default=".kg_cache", help="Cache directory root")
-    build_parser.add_argument("--method", choices=("hybrid", "semantic"), default="hybrid", help="Retriever method")
+    build_parser.add_argument(
+        "--method",
+        type=normalize_retriever_method,
+        choices=RETRIEVER_METHOD_CHOICES,
+        default="normal",
+        metavar="{normal,ALEQ}",
+        help=(
+            "Retriever method: normal is the default project retriever; "
+            "ALEQ is Adaptive Locating and Expanding Query."
+        ),
+    )
     build_parser.add_argument("--disable-kge", action="store_true", help="Skip optional RotatE training")
-    build_parser.add_argument("--semantic-threshold", type=float, default=0.05, help="Semantic node filter threshold")
-    build_parser.add_argument("--structural-threshold", type=float, default=0.05, help="Structural node filter threshold")
+    build_parser.add_argument("--semantic-threshold", type=float, default=0.05, help="Semantic node filter threshold for ALEQ")
+    build_parser.add_argument("--structural-threshold", type=float, default=0.05, help="Structural node filter threshold for ALEQ")
 
     query_parser = subparsers.add_parser("query", help="Query a graph with natural language")
     query_parser.add_argument("--graph", required=True, help="Path to graph JSON")
@@ -1200,10 +1224,20 @@ def _cli() -> int:
     query_parser.add_argument("--question", required=True, help="Natural-language question")
     query_parser.add_argument("--top-k", type=int, default=10, help="Number of triples/nodes to return")
     query_parser.add_argument("--hop-limit", type=int, default=2, help="Maximum path hop count")
-    query_parser.add_argument("--method", choices=("hybrid", "semantic"), default="hybrid", help="Retriever method")
+    query_parser.add_argument(
+        "--method",
+        type=normalize_retriever_method,
+        choices=RETRIEVER_METHOD_CHOICES,
+        default="normal",
+        metavar="{normal,ALEQ}",
+        help=(
+            "Retriever method: normal is the default project retriever; "
+            "ALEQ is Adaptive Locating and Expanding Query."
+        ),
+    )
     query_parser.add_argument("--disable-kge", action="store_true", help="Skip optional RotatE training")
-    query_parser.add_argument("--semantic-threshold", type=float, default=0.05, help="Semantic node filter threshold")
-    query_parser.add_argument("--structural-threshold", type=float, default=0.05, help="Structural node filter threshold")
+    query_parser.add_argument("--semantic-threshold", type=float, default=0.05, help="Semantic node filter threshold for ALEQ")
+    query_parser.add_argument("--structural-threshold", type=float, default=0.05, help="Structural node filter threshold for ALEQ")
 
     args = parser.parse_args()
     embedder = _default_embedder()

@@ -193,7 +193,7 @@ class HybridRetrieverTests(unittest.TestCase):
             self.assertEqual(result.triples[0]["subject"], "Melatonin")
             self.assertEqual(result.triples[0]["relation"], "treats")
 
-    def test_semantic_method_uses_project_schema_and_relation_lexicon(self) -> None:
+    def test_aleq_method_uses_project_schema_and_relation_lexicon(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             graph_path = _write_graph(tmpdir)
             retriever = build_index(
@@ -201,12 +201,12 @@ class HybridRetrieverTests(unittest.TestCase):
                 Path(tmpdir) / "cache",
                 FakeEmbedder(),
                 kge_enabled=False,
-                method="semantic",
+                method="ALEQ",
             )
 
             result = retriever.query("Autism Spectrum Disorder is treated with what?", top_k=5, hop_limit=2)
 
-            self.assertEqual(retriever.method, "semantic")
+            self.assertEqual(retriever.method, "ALEQ")
             self.assertEqual(result.debug_scores["relation_intent"]["relation"], "treats")
             self.assertEqual(result.debug_scores["relation_intent"]["direction"], -1)
             self.assertEqual(result.triples[0]["subject"], "Melatonin")
@@ -240,8 +240,11 @@ class FlaskRetrieverRegressionTests(unittest.TestCase):
             self.assertIn("nodes", payload)
             self.assertIn("triples", payload)
             self.assertIn("paths", payload)
+            self.assertIn("highlight", payload)
             self.assertTrue(payload["nodes"])
             self.assertIn(payload["nodes"][0]["id"], state.visible_node_ids)
+            self.assertTrue(payload["highlight"]["node_ids"])
+            self.assertTrue(payload["highlight"]["edges"])
 
     def test_agent_api_search_returns_structured_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

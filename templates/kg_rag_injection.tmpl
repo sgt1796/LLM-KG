@@ -1,0 +1,1030 @@
+<!-- KG-RAG workbench injection -->
+<style id="kg-rag-style">
+  html, body {
+    margin: 0 !important;
+    background: #050816 !important;
+    color: #e5e7eb !important;
+  }
+  body {
+    overflow: auto;
+  }
+  .card {
+    background: transparent !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+  }
+  #mynetwork {
+    height: 100vh !important;
+    min-height: 720px;
+    background: #050816 !important;
+    border: 1px solid #1e293b !important;
+  }
+  #loadingBar {
+    background: rgba(5, 8, 22, 0.92) !important;
+  }
+  #loadingBar #text {
+    color: #e5e7eb !important;
+  }
+  .vis-configuration-wrapper,
+  .vis-configuration {
+    background: #0f172a !important;
+    color: #e5e7eb !important;
+    border-color: #334155 !important;
+  }
+  .vis-configuration div,
+  .vis-configuration span,
+  .vis-configuration label {
+    color: #e5e7eb !important;
+  }
+  #select-menu,
+  #filter-menu {
+    max-width: min(760px, calc(100vw - 24px)) !important;
+    margin: 8px auto !important;
+    padding: 6px 8px !important;
+    border: 1px solid rgba(51, 65, 85, 0.9) !important;
+    border-radius: 8px !important;
+    background: rgba(15, 23, 42, 0.94) !important;
+    color: #e5e7eb !important;
+  }
+  center > .ts-wrapper,
+  center > select,
+  #select-node {
+    max-width: min(300px, calc(100vw - 32px)) !important;
+    margin: 6px auto !important;
+  }
+  #select-menu .row,
+  #filter-menu .row {
+    align-items: center !important;
+    row-gap: 6px !important;
+  }
+  #select-menu [class*="col-"],
+  #filter-menu [class*="col-"] {
+    flex: 0 1 auto !important;
+    width: auto !important;
+    max-width: 220px !important;
+    padding: 0 4px !important;
+  }
+  #select-menu .form-select,
+  #filter-menu .form-select,
+  #select-menu .btn,
+  #filter-menu .btn,
+  .ts-control,
+  .ts-dropdown {
+    border-color: #334155 !important;
+    background: #020617 !important;
+    color: #e5e7eb !important;
+    font-size: 12px !important;
+  }
+  #select-menu .form-select,
+  #filter-menu .form-select,
+  #select-menu .btn,
+  #filter-menu .btn,
+  .ts-control {
+    min-height: 28px !important;
+    padding: 3px 7px !important;
+    border-radius: 6px !important;
+  }
+  #select-menu .btn,
+  #filter-menu .btn {
+    background: #1e293b !important;
+    box-shadow: none !important;
+    line-height: 1.2 !important;
+  }
+  .ts-wrapper {
+    min-height: 28px !important;
+    max-width: 220px !important;
+  }
+  .ts-control input {
+    color: #f8fafc !important;
+    background: transparent !important;
+    font-size: 12px !important;
+  }
+  .ts-dropdown .option,
+  .ts-dropdown .item {
+    color: #e5e7eb !important;
+    padding: 4px 7px !important;
+  }
+  .ts-dropdown .active {
+    background: #1e293b !important;
+    color: #f8fafc !important;
+  }
+  #kg-rag-panel {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    z-index: 9999;
+    width: min(430px, calc(100vw - 24px));
+    min-width: 280px;
+    max-height: calc(100vh - 24px);
+    resize: both;
+    overflow: auto;
+    box-sizing: border-box;
+    padding: 10px;
+    border: 1px solid rgba(148, 163, 184, 0.32);
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.94);
+    color: #e5e7eb;
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.42);
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 12px;
+  }
+  #kg-rag-panel * {
+    box-sizing: border-box;
+  }
+  #kg-rag-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 10px;
+    cursor: move;
+    user-select: none;
+  }
+  .kg-title {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0;
+  }
+  .kg-muted {
+    color: #94a3b8;
+    font-size: 11px;
+  }
+  .kg-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .kg-query-row {
+    align-items: stretch;
+  }
+  #kg-query-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 30px;
+    padding: 5px 8px;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    background: #020617;
+    color: #f8fafc;
+    font-size: 12px;
+    outline: none;
+  }
+  #kg-query-input:focus {
+    border-color: #38bdf8;
+    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.18);
+  }
+  .kg-btn {
+    height: 32px;
+    padding: 0 10px;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    background: #1e293b;
+    color: #e5e7eb;
+    font-weight: 650;
+    cursor: pointer;
+  }
+  .kg-btn:hover {
+    background: #334155;
+  }
+  .kg-btn-primary {
+    height: 30px;
+    border-color: #f59e0b;
+    background: #facc15;
+    color: #111827;
+  }
+  .kg-mini-field {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: #cbd5e1;
+    font-size: 11px;
+  }
+  .kg-mini-field input {
+    width: 54px;
+    height: 28px;
+    padding: 3px 5px;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    background: #020617;
+    color: #f8fafc;
+  }
+  .kg-checkbox input {
+    width: 14px;
+    height: 14px;
+    accent-color: #facc15;
+  }
+  #kg-query-status {
+    min-height: 16px;
+    margin: 2px 0 8px;
+    color: #93c5fd;
+    font-size: 11px;
+  }
+  .kg-section {
+    margin-top: 8px;
+    padding: 8px;
+    border: 1px solid rgba(51, 65, 85, 0.9);
+    border-radius: 8px;
+    background: rgba(2, 6, 23, 0.58);
+  }
+  .kg-section-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 5px;
+    color: #cbd5e1;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0;
+  }
+  #kg-global-answer,
+  #kg-ai-answer,
+  #kg-context {
+    max-height: 145px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  #kg-context {
+    margin: 0;
+    font-family: inherit;
+    color: #dbeafe;
+  }
+  #kg-node-pager {
+    display: none;
+    align-items: center;
+    gap: 6px;
+  }
+  #kg-node-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    color: #f8fafc;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #kg-evidence-list {
+    display: grid;
+    gap: 5px;
+    max-height: 165px;
+    overflow: auto;
+  }
+  .kg-evidence-row {
+    width: 100%;
+    min-height: 34px;
+    padding: 6px 8px;
+    border: 1px solid #243244;
+    border-radius: 6px;
+    background: #0f172a;
+    color: #e5e7eb;
+    text-align: left;
+    cursor: pointer;
+  }
+  .kg-evidence-row:hover,
+  .kg-evidence-row.is-active {
+    border-color: #facc15;
+    background: rgba(250, 204, 21, 0.12);
+  }
+  .kg-evidence-main {
+    font-size: 12px;
+    font-weight: 650;
+    overflow-wrap: anywhere;
+  }
+  .kg-evidence-meta {
+    margin-top: 2px;
+    color: #94a3b8;
+    font-size: 11px;
+  }
+  @media (max-width: 680px) {
+    body {
+      overflow: auto;
+    }
+    #mynetwork {
+      min-height: 620px;
+    }
+    #kg-rag-panel {
+      left: 8px;
+      right: 8px;
+      top: 8px;
+      width: calc(100vw - 16px);
+      min-width: 0;
+      resize: vertical;
+    }
+    .kg-row {
+      flex-wrap: wrap;
+    }
+    #kg-query-input {
+      flex-basis: 100%;
+    }
+  }
+</style>
+
+<div id="kg-rag-panel" aria-live="polite">
+  <div id="kg-rag-panel-header">
+    <div>
+      <div class="kg-title">KG-RAG Workbench</div>
+      <div class="kg-muted">KG retrieval with graph spotlighting</div>
+    </div>
+    <button id="kg-fit-btn" class="kg-btn" type="button" title="Fit highlighted graph">Fit</button>
+  </div>
+
+  <div class="kg-row kg-query-row">
+    <input id="kg-query-input" type="text" placeholder="Ask a question about the graph" />
+    <button id="kg-query-btn" class="kg-btn kg-btn-primary" type="button">Ask</button>
+  </div>
+
+  <div class="kg-row">
+    <label class="kg-mini-field">Top N <input id="kg-top-n" type="number" min="1" max="50" value="15" /></label>
+    <label class="kg-mini-field">Hops <input id="kg-hop-limit" type="number" min="1" max="5" value="2" /></label>
+    <label class="kg-mini-field kg-checkbox" title="Request LLM answer and node explanations when enabled on the server">
+      <input id="kg-llm-enabled" type="checkbox" checked /> LLM
+    </label>
+    <button id="kg-clear-btn" class="kg-btn" type="button">Clear</button>
+  </div>
+
+  <div id="kg-query-status"></div>
+
+  <div class="kg-section">
+    <div class="kg-section-title">
+      <span>Answer</span>
+      <span id="kg-result-count" class="kg-muted"></span>
+    </div>
+    <div id="kg-global-answer" class="kg-muted">No query yet.</div>
+  </div>
+
+  <div class="kg-section">
+    <div class="kg-section-title">Ranked Nodes</div>
+    <div id="kg-node-pager">
+      <button id="kg-prev-node" class="kg-btn" type="button">Prev</button>
+      <span id="kg-node-label"></span>
+      <button id="kg-next-node" class="kg-btn" type="button">Next</button>
+    </div>
+    <div id="kg-node-empty" class="kg-muted">Node focus will appear after a query.</div>
+  </div>
+
+  <div class="kg-section">
+    <div class="kg-section-title">Supporting Evidence</div>
+    <div id="kg-evidence-list">
+      <div class="kg-muted">Top triples and paths will appear here.</div>
+    </div>
+  </div>
+
+  <div class="kg-section">
+    <div class="kg-section-title">Selected Node</div>
+    <pre id="kg-context"></pre>
+    <div style="height:1px;background:#1e293b;margin:7px 0;"></div>
+    <div id="kg-ai-answer" class="kg-muted"></div>
+  </div>
+</div>
+
+<script type="text/javascript">
+(function(){
+  var panel = document.getElementById("kg-rag-panel");
+  var header = document.getElementById("kg-rag-panel-header");
+  var isDragging = false;
+  var dragOffsetX = 0;
+  var dragOffsetY = 0;
+
+  var kgResult = {
+    nodes: [],
+    triples: [],
+    paths: [],
+    highlight: {node_ids: [], ranked_node_ids: [], node_scores: {}, edges: [], path_edges: []},
+    currentIndex: 0,
+    currentEvidenceIndex: -1,
+    lastQuery: "",
+    globalAnswer: "",
+    globalContext: ""
+  };
+
+  var kgOriginal = {
+    captured: false,
+    nodes: {},
+    edges: {}
+  };
+
+  function clone(obj){
+    return JSON.parse(JSON.stringify(obj || {}));
+  }
+
+  function ensureVisObjects(cb, retries){
+    retries = retries || 30;
+    if (typeof network !== "undefined" && typeof nodes !== "undefined" && typeof edges !== "undefined") {
+      cb();
+      return;
+    }
+    if (retries <= 0) {
+      setStatus("Graph did not finish initializing.");
+      return;
+    }
+    setTimeout(function(){ ensureVisObjects(cb, retries - 1); }, 200);
+  }
+
+  function ensureOriginalSnapshots(){
+    if (kgOriginal.captured || typeof nodes === "undefined" || typeof edges === "undefined") return;
+    nodes.get().forEach(function(node){ kgOriginal.nodes[node.id] = clone(node); });
+    edges.get().forEach(function(edge){ kgOriginal.edges[edge.id] = clone(edge); });
+    kgOriginal.captured = true;
+  }
+
+  function setStatus(msg){
+    var el = document.getElementById("kg-query-status");
+    if (el) el.textContent = msg || "";
+  }
+
+  function setGlobalAnswer(ans){
+    var el = document.getElementById("kg-global-answer");
+    if (!el) return;
+    el.textContent = ans || "LLM answer is disabled or unavailable. The ranked KG context is still shown below.";
+    el.classList.toggle("kg-muted", !ans);
+  }
+
+  function setAnswer(ctx, ans){
+    var ctxEl = document.getElementById("kg-context");
+    var ansEl = document.getElementById("kg-ai-answer");
+    if (ctxEl) ctxEl.textContent = ctx || "";
+    if (ansEl) {
+      ansEl.textContent = ans || "No node-level explanation returned.";
+      ansEl.classList.toggle("kg-muted", !ans);
+    }
+  }
+
+  function setResultCount(){
+    var el = document.getElementById("kg-result-count");
+    if (!el) return;
+    var nodeCount = kgResult.nodes.length;
+    var tripleCount = kgResult.triples.length;
+    el.textContent = nodeCount || tripleCount ? nodeCount + " nodes / " + tripleCount + " triples" : "";
+  }
+
+  function asNumber(value, fallback){
+    var parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  function wantsLlm(){
+    var input = document.getElementById("kg-llm-enabled");
+    return input ? !!input.checked : true;
+  }
+
+  function syncServerSettings(){
+    fetch("/healthz")
+      .then(function(res){ return res.ok ? res.json() : null; })
+      .then(function(data){
+        if (!data) return;
+        var input = document.getElementById("kg-llm-enabled");
+        if (input && data.llm_enabled === false) input.checked = false;
+      })
+      .catch(function(){});
+  }
+
+  function setFromList(items){
+    var out = {};
+    (items || []).forEach(function(item){ out[String(item)] = true; });
+    return out;
+  }
+
+  function normalizeQueryNode(node){
+    return {
+      id: String(node.id || ""),
+      score: asNumber(node.score, 0)
+    };
+  }
+
+  function edgeMatchesDescriptor(edge, descriptor, requireRelation){
+    if (!edge || !descriptor) return false;
+    var from = String(descriptor.from || "");
+    var to = String(descriptor.to || "");
+    if (!from || !to) return false;
+    var sameDirection = String(edge.from) === from && String(edge.to) === to;
+    var oppositeDirection = String(edge.from) === to && String(edge.to) === from;
+    if (!sameDirection && !oppositeDirection) return false;
+    if (!requireRelation) return true;
+    var relation = String(descriptor.relation || "");
+    var label = String(edge.label || "");
+    return !relation || !label || relation === label;
+  }
+
+  function edgeIdsForDescriptors(descriptors){
+    var ids = [];
+    var seen = {};
+    var all = edges.get();
+    (descriptors || []).forEach(function(descriptor){
+      var matched = false;
+      all.forEach(function(edge){
+        if (edgeMatchesDescriptor(edge, descriptor, true) && !seen[edge.id]) {
+          seen[edge.id] = true;
+          ids.push(edge.id);
+          matched = true;
+        }
+      });
+      if (matched) return;
+      all.forEach(function(edge){
+        if (edgeMatchesDescriptor(edge, descriptor, false) && !seen[edge.id]) {
+          seen[edge.id] = true;
+          ids.push(edge.id);
+        }
+      });
+    });
+    return ids;
+  }
+
+  function buildClientHighlight(data){
+    var highlight = {
+      node_ids: [],
+      ranked_node_ids: [],
+      node_scores: {},
+      edges: [],
+      path_edges: []
+    };
+    (data.nodes || []).forEach(function(node){
+      if (!node.id) return;
+      highlight.ranked_node_ids.push(String(node.id));
+      highlight.node_ids.push(String(node.id));
+      highlight.node_scores[String(node.id)] = asNumber(node.score, 0);
+    });
+    (data.triples || []).forEach(function(triple, index){
+      var subject = String(triple.subject || "");
+      var object = String(triple.object || "");
+      if (!subject || !object) return;
+      highlight.node_ids.push(subject, object);
+      highlight.edges.push({
+        from: subject,
+        to: object,
+        relation: String(triple.relation || ""),
+        rank: index + 1,
+        score: asNumber(triple.score, 0),
+        kind: "triple"
+      });
+    });
+    (data.paths || []).forEach(function(path, index){
+      (path.edges || []).forEach(function(edge){
+        var subject = String(edge.subject || "");
+        var object = String(edge.object || "");
+        if (!subject || !object) return;
+        highlight.node_ids.push(subject, object);
+        highlight.path_edges.push({
+          from: subject,
+          to: object,
+          relation: String(edge.relation || ""),
+          rank: index + 1,
+          kind: "path"
+        });
+      });
+    });
+    highlight.node_ids = Object.keys(setFromList(highlight.node_ids));
+    return highlight;
+  }
+
+  function restoreNodePayload(original){
+    return {
+      id: original.id,
+      label: original.label,
+      color: original.color,
+      font: original.font,
+      borderWidth: original.borderWidth,
+      borderWidthSelected: original.borderWidthSelected,
+      shadow: original.shadow,
+      size: original.size,
+      value: original.value
+    };
+  }
+
+  function restoreEdgePayload(original){
+    return {
+      id: original.id,
+      color: original.color,
+      width: original.width,
+      font: original.font,
+      shadow: original.shadow,
+      label: original.label,
+      arrows: original.arrows,
+      value: original.value
+    };
+  }
+
+  function resetGraphStyles(){
+    ensureOriginalSnapshots();
+    if (!kgOriginal.captured) return;
+    var nodeUpdates = Object.keys(kgOriginal.nodes).map(function(id){
+      return restoreNodePayload(kgOriginal.nodes[id]);
+    });
+    var edgeUpdates = Object.keys(kgOriginal.edges).map(function(id){
+      return restoreEdgePayload(kgOriginal.edges[id]);
+    });
+    if (nodeUpdates.length) nodes.update(nodeUpdates);
+    if (edgeUpdates.length) edges.update(edgeUpdates);
+    if (typeof network !== "undefined") network.unselectAll();
+  }
+
+  function applyGraphSpotlight(){
+    ensureOriginalSnapshots();
+    if (!kgOriginal.captured) return;
+
+    var highlight = kgResult.highlight || {};
+    var rankedIds = (highlight.ranked_node_ids && highlight.ranked_node_ids.length)
+      ? highlight.ranked_node_ids
+      : kgResult.nodes.map(function(node){ return node.id; });
+    var nodeIds = (highlight.node_ids || []).concat(rankedIds);
+    var nodeSet = setFromList(nodeIds);
+    var rankedSet = setFromList(rankedIds);
+    var current = kgResult.nodes[kgResult.currentIndex] || null;
+    var currentId = current ? current.id : "";
+    var nodeScores = highlight.node_scores || {};
+
+    var evidenceEdgeIds = edgeIdsForDescriptors(highlight.edges || []);
+    var pathEdgeIds = edgeIdsForDescriptors(highlight.path_edges || []);
+    var currentEvidence = kgResult.currentEvidenceIndex >= 0
+      ? [kgResult.triples[kgResult.currentEvidenceIndex]]
+      : [];
+    var currentEdgeIds = edgeIdsForDescriptors((currentEvidence || []).map(function(triple){
+      return {
+        from: triple.subject,
+        to: triple.object,
+        relation: triple.relation
+      };
+    }));
+    var evidenceSet = setFromList(evidenceEdgeIds);
+    var pathSet = setFromList(pathEdgeIds);
+    var currentEdgeSet = setFromList(currentEdgeIds);
+
+    var nodeUpdates = nodes.get().map(function(node){
+      var original = kgOriginal.nodes[node.id] || node;
+      var isHighlighted = !!nodeSet[node.id];
+      var isRanked = !!rankedSet[node.id];
+      var isCurrent = node.id === currentId;
+      var baseSize = asNumber(original.size, asNumber(original.value, 10));
+      if (!isHighlighted) {
+        return {
+          id: node.id,
+          label: original.label || "",
+          color: {
+            background: "rgba(30, 41, 59, 0.30)",
+            border: "rgba(100, 116, 139, 0.22)",
+            highlight: {background: "#334155", border: "#64748b"},
+            hover: {background: "#334155", border: "#94a3b8"}
+          },
+          font: {color: "rgba(148, 163, 184, 0.42)", strokeWidth: 2, strokeColor: "#050816"},
+          borderWidth: 1,
+          shadow: false,
+          size: Math.max(6, Math.min(baseSize, 12))
+        };
+      }
+      var score = asNumber(nodeScores[node.id], isRanked ? 1 : 0);
+      var lift = Math.min(12, Math.max(4, score * 1.2));
+      return {
+        id: node.id,
+        label: original.label || String(node.id),
+        color: {
+          background: isCurrent ? "#22d3ee" : "#fde047",
+          border: isCurrent ? "#e0f2fe" : "#f97316",
+          highlight: {
+            background: isCurrent ? "#67e8f9" : "#facc15",
+            border: "#ffffff"
+          },
+          hover: {
+            background: isCurrent ? "#67e8f9" : "#fef08a",
+            border: "#ffffff"
+          }
+        },
+        font: {color: "#f8fafc", strokeWidth: 4, strokeColor: "#020617"},
+        borderWidth: isCurrent ? 4 : 3,
+        shadow: {
+          enabled: true,
+          color: isCurrent ? "rgba(34, 211, 238, 0.85)" : "rgba(250, 204, 21, 0.72)",
+          size: isCurrent ? 24 : 16,
+          x: 0,
+          y: 0
+        },
+        size: Math.max(baseSize + lift, isCurrent ? 24 : 18)
+      };
+    });
+    if (nodeUpdates.length) nodes.update(nodeUpdates);
+
+    var edgeUpdates = edges.get().map(function(edge){
+      var original = kgOriginal.edges[edge.id] || edge;
+      var baseWidth = asNumber(original.width, 1);
+      var isEvidence = !!evidenceSet[edge.id];
+      var isPath = !!pathSet[edge.id];
+      var isCurrent = !!currentEdgeSet[edge.id];
+      if (!isEvidence && !isPath) {
+        return {
+          id: edge.id,
+          color: {color: "rgba(71, 85, 105, 0.16)", highlight: "#475569", hover: "#64748b"},
+          width: Math.max(0.6, baseWidth * 0.55),
+          font: {color: "rgba(148, 163, 184, 0.26)", strokeWidth: 3, strokeColor: "#050816"},
+          shadow: false
+        };
+      }
+      return {
+        id: edge.id,
+        color: {
+          color: isCurrent ? "#22d3ee" : (isEvidence ? "#facc15" : "#38bdf8"),
+          highlight: isCurrent ? "#67e8f9" : "#fde047",
+          hover: "#ffffff"
+        },
+        width: baseWidth + (isCurrent ? 4 : 2.5),
+        font: {color: "#e5e7eb", strokeWidth: 4, strokeColor: "#020617"},
+        shadow: {
+          enabled: true,
+          color: isCurrent ? "rgba(34, 211, 238, 0.8)" : "rgba(250, 204, 21, 0.62)",
+          size: isCurrent ? 18 : 11,
+          x: 0,
+          y: 0
+        }
+      };
+    });
+    if (edgeUpdates.length) edges.update(edgeUpdates);
+
+  }
+
+  function fitHighlightedGraph(){
+    var highlight = kgResult.highlight || {};
+    var ids = ((highlight.node_ids || []).concat(highlight.ranked_node_ids || []))
+      .filter(function(id){ return !!nodes.get(id); });
+    var uniqueIds = Object.keys(setFromList(ids));
+    if (uniqueIds.length) {
+      network.fit({nodes: uniqueIds, animation: {duration: 650, easingFunction: "easeInOutQuad"}});
+    } else {
+      network.fit({animation: {duration: 650, easingFunction: "easeInOutQuad"}});
+    }
+  }
+
+  function focusNodeById(nodeId, scale){
+    if (!nodeId || !nodes.get(nodeId)) return;
+    network.focus(nodeId, {
+      scale: scale || 1.5,
+      animation: {duration: 650, easingFunction: "easeInOutQuad"}
+    });
+  }
+
+  function updateNodePager(){
+    var pager = document.getElementById("kg-node-pager");
+    var empty = document.getElementById("kg-node-empty");
+    var label = document.getElementById("kg-node-label");
+    if (!pager || !empty || !label) return;
+
+    if (!kgResult.nodes.length) {
+      pager.style.display = "none";
+      empty.style.display = "block";
+      label.textContent = "";
+      return;
+    }
+
+    kgResult.currentIndex = Math.max(0, Math.min(kgResult.currentIndex, kgResult.nodes.length - 1));
+    var node = kgResult.nodes[kgResult.currentIndex];
+    pager.style.display = "flex";
+    empty.style.display = "none";
+    label.textContent = (kgResult.currentIndex + 1) + "/" + kgResult.nodes.length + "  " + node.id + "  score " + node.score.toFixed(3);
+  }
+
+  function renderEvidenceList(){
+    var list = document.getElementById("kg-evidence-list");
+    if (!list) return;
+    list.innerHTML = "";
+    if (!kgResult.triples.length) {
+      var empty = document.createElement("div");
+      empty.className = "kg-muted";
+      empty.textContent = "No supporting triples returned.";
+      list.appendChild(empty);
+      return;
+    }
+
+    kgResult.triples.forEach(function(triple, index){
+      var row = document.createElement("button");
+      row.type = "button";
+      row.className = "kg-evidence-row" + (index === kgResult.currentEvidenceIndex ? " is-active" : "");
+      row.dataset.index = String(index);
+
+      var main = document.createElement("div");
+      main.className = "kg-evidence-main";
+      main.textContent = (index + 1) + ". " + triple.subject + " [" + triple.relation + "] " + triple.object;
+
+      var meta = document.createElement("div");
+      meta.className = "kg-evidence-meta";
+      meta.textContent = "score " + asNumber(triple.score, 0).toFixed(3) + " / weight " + asNumber(triple.weight, 0).toFixed(2);
+
+      row.appendChild(main);
+      row.appendChild(meta);
+      row.addEventListener("click", function(){
+        focusEvidence(Number(row.dataset.index));
+      });
+      list.appendChild(row);
+    });
+  }
+
+  function requestNodeExplain(){
+    if (!kgResult.nodes.length) return;
+    var node = kgResult.nodes[kgResult.currentIndex];
+    if (!node || !node.id) return;
+    var q = kgResult.lastQuery || "";
+    if (!q) return;
+
+    setStatus('Explaining node "' + node.id + '"...');
+    fetch("/node_explain", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        query: q,
+        node_id: node.id,
+        global_answer: kgResult.globalAnswer,
+        include_explanation: wantsLlm()
+      })
+    })
+    .then(function(res){ return res.json(); })
+    .then(function(data){
+      if (data.error) {
+        setStatus("Error: " + data.error);
+        return;
+      }
+      setStatus('Node "' + node.id + '" loaded.');
+      setAnswer(data.context || "", data.explanation || "");
+    })
+    .catch(function(err){
+      console.error(err);
+      setStatus("Node explanation failed.");
+      setAnswer("", "");
+    });
+  }
+
+  function showNodeAt(index){
+    if (!kgResult.nodes.length) return;
+    kgResult.currentIndex = Math.max(0, Math.min(index, kgResult.nodes.length - 1));
+    kgResult.currentEvidenceIndex = -1;
+    updateNodePager();
+    renderEvidenceList();
+    applyGraphSpotlight();
+    focusNodeById(kgResult.nodes[kgResult.currentIndex].id, 1.55);
+    requestNodeExplain();
+  }
+
+  function focusEvidence(index){
+    if (index < 0 || index >= kgResult.triples.length) return;
+    kgResult.currentEvidenceIndex = index;
+    var triple = kgResult.triples[index];
+    var endpointIds = [String(triple.subject || ""), String(triple.object || "")]
+      .filter(function(id){ return !!id && !!nodes.get(id); });
+    var nodeIndex = kgResult.nodes.findIndex(function(node){
+      return node.id === triple.subject || node.id === triple.object;
+    });
+    if (nodeIndex >= 0) {
+      kgResult.currentIndex = nodeIndex;
+      requestNodeExplain();
+    }
+    updateNodePager();
+    renderEvidenceList();
+    applyGraphSpotlight();
+    if (endpointIds.length) {
+      network.fit({nodes: endpointIds, animation: {duration: 650, easingFunction: "easeInOutQuad"}});
+    }
+    setStatus("Evidence triple " + (index + 1) + " spotlighted.");
+  }
+
+  function clearWorkbench(){
+    kgResult = {
+      nodes: [],
+      triples: [],
+      paths: [],
+      highlight: {node_ids: [], ranked_node_ids: [], node_scores: {}, edges: [], path_edges: []},
+      currentIndex: 0,
+      currentEvidenceIndex: -1,
+      lastQuery: "",
+      globalAnswer: "",
+      globalContext: ""
+    };
+    setStatus("");
+    setGlobalAnswer("");
+    setAnswer("", "");
+    setResultCount();
+    updateNodePager();
+    renderEvidenceList();
+    resetGraphStyles();
+  }
+
+  function sendQuery(){
+    var input = document.getElementById("kg-query-input");
+    var topNInput = document.getElementById("kg-top-n");
+    var hopInput = document.getElementById("kg-hop-limit");
+    var q = input ? input.value.trim() : "";
+    if (!q) return;
+
+    var topN = Math.max(1, Math.min(50, parseInt(topNInput && topNInput.value ? topNInput.value : "15", 10) || 15));
+    var hopLimit = Math.max(1, Math.min(5, parseInt(hopInput && hopInput.value ? hopInput.value : "2", 10) || 2));
+
+    clearWorkbench();
+    kgResult.lastQuery = q;
+    setStatus("Querying KG-RAG backend...");
+
+    fetch("/query", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({query: q, top_n: topN, hop_limit: hopLimit, include_answer: wantsLlm()})
+    })
+    .then(function(res){
+      return res.json().then(function(data){
+        if (!res.ok) throw data;
+        return data;
+      });
+    })
+    .then(function(data){
+      kgResult.nodes = (data.nodes || []).map(normalizeQueryNode).filter(function(node){ return !!node.id; });
+      kgResult.triples = data.triples || [];
+      kgResult.paths = data.paths || [];
+      kgResult.highlight = data.highlight || buildClientHighlight(data);
+      kgResult.currentIndex = 0;
+      kgResult.currentEvidenceIndex = -1;
+      kgResult.globalAnswer = data.answer || "";
+      kgResult.globalContext = data.context || "";
+
+      setGlobalAnswer(kgResult.globalAnswer);
+      setAnswer(kgResult.globalContext, kgResult.globalAnswer);
+      setResultCount();
+      updateNodePager();
+      renderEvidenceList();
+
+      if (kgResult.nodes.length || kgResult.triples.length) {
+        applyGraphSpotlight();
+        fitHighlightedGraph();
+        if (wantsLlm() && !data.llm_enabled) {
+          setStatus("Query complete. LLM is off on the server; graph evidence is lit.");
+        } else {
+          setStatus("Query complete. Result nodes and evidence edges are lit.");
+        }
+        if (kgResult.nodes.length) requestNodeExplain();
+      } else {
+        resetGraphStyles();
+        setStatus("No visible graph matches were returned for this query.");
+      }
+    })
+    .catch(function(err){
+      console.error(err);
+      setStatus("Request failed: " + (err && err.error ? err.error : "see console"));
+      setGlobalAnswer(err && err.error ? err.error : "Request failed before the KG result could be returned.");
+      resetGraphStyles();
+    });
+  }
+
+  function attachHandlers(){
+    var btn = document.getElementById("kg-query-btn");
+    var input = document.getElementById("kg-query-input");
+    var prevBtn = document.getElementById("kg-prev-node");
+    var nextBtn = document.getElementById("kg-next-node");
+    var fitBtn = document.getElementById("kg-fit-btn");
+    var clearBtn = document.getElementById("kg-clear-btn");
+
+    if (btn) btn.addEventListener("click", sendQuery);
+    if (input) {
+      input.addEventListener("keydown", function(ev){
+        if (ev.key === "Enter") sendQuery();
+      });
+    }
+    if (prevBtn) prevBtn.addEventListener("click", function(){ showNodeAt(kgResult.currentIndex - 1); });
+    if (nextBtn) nextBtn.addEventListener("click", function(){ showNodeAt(kgResult.currentIndex + 1); });
+    if (fitBtn) fitBtn.addEventListener("click", fitHighlightedGraph);
+    if (clearBtn) clearBtn.addEventListener("click", clearWorkbench);
+    syncServerSettings();
+
+    network.on("selectNode", function(params){
+      if (!params.nodes || !params.nodes.length || !kgResult.nodes.length) return;
+      var selectedId = String(params.nodes[0]);
+      var idx = kgResult.nodes.findIndex(function(node){ return node.id === selectedId; });
+      if (idx >= 0 && idx !== kgResult.currentIndex) showNodeAt(idx);
+    });
+  }
+
+  if (panel && header) {
+    header.addEventListener("mousedown", function(e){
+      if (e.target && e.target.tagName === "BUTTON") return;
+      isDragging = true;
+      dragOffsetX = e.clientX - panel.offsetLeft;
+      dragOffsetY = e.clientY - panel.offsetTop;
+      document.body.style.userSelect = "none";
+    });
+    document.addEventListener("mousemove", function(e){
+      if (!isDragging) return;
+      panel.style.left = Math.max(4, e.clientX - dragOffsetX) + "px";
+      panel.style.top = Math.max(4, e.clientY - dragOffsetY) + "px";
+      panel.style.right = "auto";
+    });
+    document.addEventListener("mouseup", function(){
+      isDragging = false;
+      document.body.style.userSelect = "";
+    });
+  }
+
+  ensureVisObjects(function(){
+    ensureOriginalSnapshots();
+    attachHandlers();
+    updateNodePager();
+    renderEvidenceList();
+  }, 40);
+
+  window.kgRagWorkbench = {
+    clear: clearWorkbench,
+    fit: fitHighlightedGraph,
+    getResult: function(){ return clone(kgResult); }
+  };
+})();
+</script>
