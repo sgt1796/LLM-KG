@@ -191,3 +191,10 @@ papers/
 *.json
 *.html
 *.pdf
+
+# Local agent copy: keep secrets and generated runtime artifacts out of git.
+POP-agent/credentials/
+POP-agent/downloads/
+POP-agent/eval/runs/
+POP-agent/.env
+POP-agent/.env.*
