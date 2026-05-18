@@ -2,13 +2,14 @@ import hashlib
 import json
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
 
 from kg_pipeline.rag import build_index
-from kg_rag_app import KGRagState, build_incident_triples, create_app, create_app_from_env
+from kg_rag_app import KGGraphRegistry, KGRagState, build_incident_triples, create_app, create_app_from_env
 
 
 def _tokenize(text: str) -> list[str]:
@@ -111,6 +112,12 @@ def _sample_graph() -> dict:
     }
 
 
+def _sample_graph_with_long_evidence() -> dict:
+    graph = _sample_graph()
+    graph["triples"][0]["sources"][0]["evidence"] = "Stress evidence " + ("long biomedical evidence. " * 30)
+    return graph
+
+
 def _write_graph(tmpdir: str, name: str = "graph.json") -> Path:
     path = Path(tmpdir) / name
     with open(path, "w", encoding="utf-8") as handle:
@@ -118,11 +125,11 @@ def _write_graph(tmpdir: str, name: str = "graph.json") -> Path:
     return path
 
 
-class HybridRetrieverTests(unittest.TestCase):
+class AleqRetrieverTests(unittest.TestCase):
     def test_alias_resolution_maps_acronym_to_full_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             graph_path = _write_graph(tmpdir)
-            retriever = build_index(graph_path, Path(tmpdir) / "cache", FakeEmbedder(), kge_enabled=False)
+            retriever = build_index(graph_path, Path(tmpdir) / "cache", FakeEmbedder())
 
             result = retriever.query("What causes ASD?", top_k=5, hop_limit=2)
 
@@ -134,7 +141,7 @@ class HybridRetrieverTests(unittest.TestCase):
     def test_inverted_relation_phrase_returns_correct_direction(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             graph_path = _write_graph(tmpdir)
-            retriever = build_index(graph_path, Path(tmpdir) / "cache", FakeEmbedder(), kge_enabled=False)
+            retriever = build_index(graph_path, Path(tmpdir) / "cache", FakeEmbedder())
 
             result = retriever.query("Autism Spectrum Disorder is treated with what?", top_k=5, hop_limit=2)
 
@@ -150,30 +157,29 @@ class HybridRetrieverTests(unittest.TestCase):
             cache_root = Path(tmpdir) / "cache"
 
             embedder_one = FakeEmbedder()
-            build_index(graph_path, cache_root, embedder_one, kge_enabled=False)
+            build_index(graph_path, cache_root, embedder_one)
             self.assertEqual(embedder_one.calls, 3)
 
             embedder_two = FakeEmbedder()
-            build_index(graph_path, cache_root, embedder_two, kge_enabled=False)
+            build_index(graph_path, cache_root, embedder_two)
             self.assertEqual(embedder_two.calls, 0)
 
-    def test_kge_unavailable_falls_back_cleanly(self) -> None:
+    def test_aleq_reports_kge_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             graph_path = _write_graph(tmpdir)
             cache_root = Path(tmpdir) / "cache"
 
-            with patch("kg_pipeline.rag._train_rotate_embeddings", side_effect=ImportError("PyKEEN is not installed")):
-                retriever = build_index(graph_path, cache_root, FakeEmbedder(), kge_enabled=True)
+            retriever = build_index(graph_path, cache_root, FakeEmbedder())
 
             self.assertFalse(retriever.kge.available)
-            self.assertEqual(retriever.kge.metadata["status"], "unavailable")
+            self.assertEqual(retriever.kge.metadata["status"], "disabled")
             result = retriever.query("What causes ASD?", top_k=5, hop_limit=2)
             self.assertEqual(result.triples[0]["relation"], "causes")
 
     def test_related_question_returns_direct_triple_or_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             graph_path = _write_graph(tmpdir)
-            retriever = build_index(graph_path, Path(tmpdir) / "cache", FakeEmbedder(), kge_enabled=False)
+            retriever = build_index(graph_path, Path(tmpdir) / "cache", FakeEmbedder())
 
             result = retriever.query("How is IL-6 related to TNF?", top_k=5, hop_limit=2)
 
@@ -186,22 +192,20 @@ class HybridRetrieverTests(unittest.TestCase):
     def test_open_ended_question_uses_triple_text_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             graph_path = _write_graph(tmpdir)
-            retriever = build_index(graph_path, Path(tmpdir) / "cache", FakeEmbedder(), kge_enabled=False)
+            retriever = build_index(graph_path, Path(tmpdir) / "cache", FakeEmbedder())
 
             result = retriever.query("Which drugs treat autism?", top_k=5, hop_limit=2)
 
             self.assertEqual(result.triples[0]["subject"], "Melatonin")
             self.assertEqual(result.triples[0]["relation"], "treats")
 
-    def test_aleq_method_uses_project_schema_and_relation_lexicon(self) -> None:
+    def test_aleq_uses_project_schema_and_relation_lexicon(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             graph_path = _write_graph(tmpdir)
             retriever = build_index(
                 graph_path,
                 Path(tmpdir) / "cache",
                 FakeEmbedder(),
-                kge_enabled=False,
-                method="ALEQ",
             )
 
             result = retriever.query("Autism Spectrum Disorder is treated with what?", top_k=5, hop_limit=2)
@@ -216,10 +220,139 @@ class HybridRetrieverTests(unittest.TestCase):
 
 
 class FlaskRetrieverRegressionTests(unittest.TestCase):
+    def test_no_graph_startup_serves_upload_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = KGGraphRegistry(Path(tmpdir) / "cache", embedder_factory=lambda _model: FakeEmbedder())
+            app = create_app(registry)
+            client = app.test_client()
+
+            response = client.get("/")
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b"Upload graph JSON", response.data)
+            self.assertIn(b'enctype="multipart/form-data"', response.data)
+
+    def test_upload_valid_graph_redirects_to_graph_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = KGGraphRegistry(Path(tmpdir) / "cache", embedder_factory=lambda _model: FakeEmbedder())
+            app = create_app(registry)
+            client = app.test_client()
+
+            payload = json.dumps(_sample_graph()).encode("utf-8")
+            response = client.post(
+                "/upload",
+                data={"graph": (BytesIO(payload), "sample.json")},
+                content_type="multipart/form-data",
+            )
+
+            self.assertEqual(response.status_code, 302)
+            self.assertIn("/graph/", response.headers["Location"])
+            self.assertEqual(len(registry.records), 1)
+            record = next(iter(registry.records.values()))
+            self.assertTrue(record.graph_path.exists())
+
+    def test_upload_invalid_graph_returns_error_page(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry = KGGraphRegistry(Path(tmpdir) / "cache", embedder_factory=lambda _model: FakeEmbedder())
+            app = create_app(registry)
+            client = app.test_client()
+
+            response = client.post(
+                "/upload",
+                data={"graph": (BytesIO(b"{not json"), "broken.json")},
+                content_type="multipart/form-data",
+            )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn(b"valid UTF-8 JSON", response.data)
+
+    def test_graph_specific_query_uses_requested_graph_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            graph_path = _write_graph(tmpdir)
+            registry = KGGraphRegistry(Path(tmpdir) / "cache", embedder_factory=lambda _model: FakeEmbedder())
+            record = registry.register_existing_graph(graph_path, graph_id="sample")
+            app = create_app(registry)
+            client = app.test_client()
+
+            response = client.post(
+                "/query",
+                json={"graph_id": record.graph_id, "query": "What causes ASD?", "top_n": 5, "include_answer": False},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload["graph_id"], "sample")
+            self.assertEqual(payload["retriever_method"], "ALEQ")
+            self.assertEqual(payload["triples"][0]["relation"], "causes")
+
+    def test_query_defaults_to_aleq_without_method_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            graph_path = _write_graph(tmpdir)
+            registry = KGGraphRegistry(Path(tmpdir) / "cache", embedder_factory=lambda _model: FakeEmbedder())
+            registry.register_existing_graph(graph_path, graph_id="sample")
+            app = create_app(registry)
+            client = app.test_client()
+
+            default_response = client.post(
+                "/api/search",
+                json={"graph_id": "sample", "question": "What causes ASD?", "top_k": 5},
+            )
+
+            self.assertEqual(default_response.status_code, 200)
+            self.assertEqual(default_response.get_json()["retriever_method"], "ALEQ")
+
+    def test_provenance_endpoint_returns_limited_preview_and_full_node_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            graph_path = Path(tmpdir) / "graph.json"
+            with open(graph_path, "w", encoding="utf-8") as handle:
+                json.dump(_sample_graph_with_long_evidence(), handle)
+            registry = KGGraphRegistry(Path(tmpdir) / "cache", embedder_factory=lambda _model: FakeEmbedder())
+            registry.register_existing_graph(graph_path, graph_id="sample")
+            app = create_app(registry)
+            client = app.test_client()
+
+            response = client.post(
+                "/api/provenance",
+                json={"graph_id": "sample", "type": "node", "node_id": "Stress"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertLessEqual(len(payload["preview"]), 240)
+            self.assertTrue(payload["is_truncated"])
+            self.assertIn("long biomedical evidence", payload["full_text"])
+
+    def test_provenance_endpoint_returns_edge_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            graph_path = Path(tmpdir) / "graph.json"
+            with open(graph_path, "w", encoding="utf-8") as handle:
+                json.dump(_sample_graph_with_long_evidence(), handle)
+            registry = KGGraphRegistry(Path(tmpdir) / "cache", embedder_factory=lambda _model: FakeEmbedder())
+            registry.register_existing_graph(graph_path, graph_id="sample")
+            app = create_app(registry)
+            client = app.test_client()
+
+            response = client.post(
+                "/api/provenance",
+                json={
+                    "graph_id": "sample",
+                    "type": "edge",
+                    "from": "Stress",
+                    "to": "Autism Spectrum Disorder",
+                    "relation": "causes",
+                },
+            )
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertLessEqual(len(payload["preview"]), 240)
+            self.assertEqual(payload["triples"][0]["relation"], "causes")
+            self.assertIn("Stress --[causes]--> Autism Spectrum Disorder", payload["full_text"])
+
     def test_query_endpoint_returns_highlightable_focus_nodes_without_kge(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             graph_path = _write_graph(tmpdir)
-            retriever = build_index(graph_path, Path(tmpdir) / "cache", FakeEmbedder(), kge_enabled=False)
+            retriever = build_index(graph_path, Path(tmpdir) / "cache", FakeEmbedder())
             node_ids = [record["id"] for record in retriever.node_records]
             state = KGRagState(
                 graph=retriever.graph,
@@ -249,7 +382,7 @@ class FlaskRetrieverRegressionTests(unittest.TestCase):
     def test_agent_api_search_returns_structured_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             graph_path = _write_graph(tmpdir)
-            retriever = build_index(graph_path, Path(tmpdir) / "cache", FakeEmbedder(), kge_enabled=False)
+            retriever = build_index(graph_path, Path(tmpdir) / "cache", FakeEmbedder())
             node_ids = [record["id"] for record in retriever.node_records]
             state = KGRagState(
                 graph=retriever.graph,
@@ -285,7 +418,6 @@ class FlaskRetrieverRegressionTests(unittest.TestCase):
                 {
                     "KG_GRAPH_PATH": str(graph_path),
                     "KG_CACHE_DIR": str(cache_dir),
-                    "KG_KGE_ENABLED": "false",
                     "KG_OPENAI_EMBED_MODEL": "fake-model",
                 },
                 clear=False,

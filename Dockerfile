@@ -4,7 +4,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PORT=8000 \
-    KG_GRAPH_PATH=/data/graph/graph.json \
     KG_CACHE_DIR=/data/cache \
     KG_KGE_ENABLED=false \
     KG_ENABLE_LLM_ANSWER=true \

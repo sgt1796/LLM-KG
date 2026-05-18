@@ -23,25 +23,26 @@ This file is designed to be dropped into the existing repo root and run as:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import html
 import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Tuple
 import sys, subprocess
 import re
 
 import numpy as np
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, redirect, request, url_for
 import networkx as nx
-from pyvis.network import Network
 from dotenv import load_dotenv
 load_dotenv()
 
 # ---- Import Embedder (your existing class) ---------------------------------
 
 from Embedder import Embedder  # type: ignore
-from kg_pipeline.rag import RETRIEVER_METHOD_CHOICES, build_index, normalize_retriever_method
+from kg_pipeline.rag import build_index
 from llm_utils.LLMClient import OpenAIClient  # type: ignore
 from llm_utils.POP import PromptFunction  # type: ignore
 # ---- Data structures --------------------------------------------------------
@@ -55,8 +56,168 @@ class KGRagState:
     cache_dir: Path
     incident_triples: Dict[str, List[dict]]
     visible_node_ids: List[str]
-    retriever_method: str = "normal"
+    retriever_method: str = "ALEQ"
     llm_enabled: bool = False
+
+
+EVIDENCE_PREVIEW_CHARS = 240
+DEFAULT_GRAPH_ID = "default"
+
+
+@dataclass
+class KGGraphRecord:
+    graph_id: str
+    graph_path: Path
+    cache_dir: Path
+    source_name: str
+    node_ids: List[str]
+    triples: List[dict]
+    incident_triples: Dict[str, List[dict]]
+    visible_node_ids: List[str]
+
+    @property
+    def node_count(self) -> int:
+        return len(self.node_ids)
+
+    @property
+    def triple_count(self) -> int:
+        return len(self.triples)
+
+
+class KGGraphRegistry:
+    """Track uploaded/default graphs plus their lazy retriever states."""
+
+    def __init__(
+        self,
+        cache_dir: Path,
+        *,
+        embed_model: str = "text-embedding-3-small",
+        embedder_factory: Callable[[str], Any] | None = None,
+        semantic_threshold: float = 0.05,
+        structural_threshold: float = 0.05,
+        llm_enabled: bool | None = None,
+    ) -> None:
+        self.cache_dir = Path(cache_dir)
+        self.upload_dir = self.cache_dir / "uploads"
+        self.render_dir = self.cache_dir / "rendered"
+        self.embed_model = embed_model
+        self.embedder_factory = embedder_factory
+        self.semantic_threshold = float(semantic_threshold)
+        self.structural_threshold = float(structural_threshold)
+        self.llm_enabled = _llm_answer_enabled() if llm_enabled is None else bool(llm_enabled)
+        self.records: Dict[str, KGGraphRecord] = {}
+        self.states: Dict[str, KGRagState] = {}
+        self.default_graph_id: str | None = None
+
+        self.upload_dir.mkdir(parents=True, exist_ok=True)
+        self.render_dir.mkdir(parents=True, exist_ok=True)
+
+    def register_existing_graph(
+        self,
+        graph_path: Path,
+        *,
+        graph_id: str | None = None,
+        source_name: str | None = None,
+        make_default: bool = True,
+    ) -> KGGraphRecord:
+        graph_path = Path(graph_path)
+        if not graph_path.exists():
+            raise FileNotFoundError(f"Graph file not found: {graph_path}")
+
+        graph_id = graph_id or _graph_id_for_file(graph_path)
+        _graph, node_ids, triples = load_graph(graph_path)
+        _validate_graph_parts(node_ids, triples)
+        record = KGGraphRecord(
+            graph_id=graph_id,
+            graph_path=graph_path,
+            cache_dir=self.cache_dir,
+            source_name=source_name or graph_path.name,
+            node_ids=node_ids,
+            triples=triples,
+            incident_triples=build_incident_triples(node_ids, triples),
+            visible_node_ids=[],
+        )
+        self.records[graph_id] = record
+        if make_default or self.default_graph_id is None:
+            self.default_graph_id = graph_id
+        return record
+
+    def register_upload(self, file_storage: Any) -> KGGraphRecord:
+        filename = str(getattr(file_storage, "filename", "") or "uploaded_graph.json")
+        payload = file_storage.read()
+        if not payload:
+            raise ValueError("Uploaded file is empty.")
+
+        try:
+            data = json.loads(payload.decode("utf-8"))
+        except Exception as exc:
+            raise ValueError("Uploaded file must be valid UTF-8 JSON.") from exc
+
+        node_ids, triples = _validate_graph_data(data)
+        graph_id = hashlib.sha256(payload).hexdigest()[:24]
+        graph_path = self.upload_dir / f"{graph_id}.json"
+        if not graph_path.exists():
+            with open(graph_path, "wb") as handle:
+                handle.write(payload)
+
+        record = KGGraphRecord(
+            graph_id=graph_id,
+            graph_path=graph_path,
+            cache_dir=self.cache_dir,
+            source_name=Path(filename).name,
+            node_ids=node_ids,
+            triples=triples,
+            incident_triples=build_incident_triples(node_ids, triples),
+            visible_node_ids=[],
+        )
+        self.records[graph_id] = record
+        if self.default_graph_id is None:
+            self.default_graph_id = graph_id
+        return record
+
+    def get_record(self, graph_id: str | None = None) -> KGGraphRecord:
+        resolved = self.resolve_graph_id(graph_id)
+        if not resolved or resolved not in self.records:
+            raise KeyError("No graph is loaded.")
+        return self.records[resolved]
+
+    def resolve_graph_id(self, graph_id: str | None = None) -> str | None:
+        if graph_id:
+            return str(graph_id)
+        return self.default_graph_id
+
+    def get_state(self, graph_id: str | None = None) -> KGRagState:
+        record = self.get_record(graph_id)
+        key = record.graph_id
+        if key not in self.states:
+            embedder = self._make_embedder()
+            state = build_state(
+                graph_path=record.graph_path,
+                cache_dir=self.cache_dir,
+                embedder=embedder,
+                embed_model=self.embed_model,
+                semantic_threshold=self.semantic_threshold,
+                structural_threshold=self.structural_threshold,
+                llm_enabled=self.llm_enabled,
+            )
+            state.visible_node_ids = list(record.visible_node_ids)
+            self.states[key] = state
+        return self.states[key]
+
+    def set_visible_node_ids(self, graph_id: str, node_ids: Iterable[str]) -> None:
+        record = self.records[graph_id]
+        record.visible_node_ids = [str(node_id) for node_id in node_ids]
+        for state_graph_id, state in self.states.items():
+            if state_graph_id == graph_id:
+                state.visible_node_ids = list(record.visible_node_ids)
+
+    def render_path(self, graph_id: str) -> Path:
+        return self.render_dir / f"{graph_id}.html"
+
+    def _make_embedder(self) -> Any:
+        if self.embedder_factory is not None:
+            return self.embedder_factory(self.embed_model)
+        return Embedder(use_api="openai", model_name=self.embed_model)
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -124,6 +285,77 @@ def load_graph(path: Path) -> Tuple[nx.Graph, List[str], List[dict]]:
     print(f"[kg_rag_app] Loaded graph: nodes={len(node_ids)}, edges={G.number_of_edges()}")
     return G, node_ids, triples
 
+
+def _triple_subject(triple: dict) -> str:
+    return str(triple.get("h") or triple.get("subject") or "").strip()
+
+
+def _triple_object(triple: dict) -> str:
+    return str(triple.get("t") or triple.get("object") or "").strip()
+
+
+def _triple_relation(triple: dict) -> str:
+    return str(triple.get("r") or triple.get("relation") or "").strip()
+
+
+def _validate_graph_parts(node_ids: List[str], triples: List[dict]) -> None:
+    valid = [
+        triple
+        for triple in triples
+        if isinstance(triple, dict) and _triple_subject(triple) and _triple_object(triple)
+    ]
+    if not node_ids or not valid:
+        raise ValueError("Graph JSON must contain at least one valid triple with subject/object nodes.")
+
+
+def _node_id_from_payload(node: Any) -> str:
+    if isinstance(node, dict):
+        return str(node.get("id") or node.get("name") or node.get("label") or "").strip()
+    return str(node or "").strip()
+
+
+def _validate_graph_data(data: Any) -> Tuple[List[str], List[dict]]:
+    if not isinstance(data, dict):
+        raise ValueError("Graph JSON must be an object with a triples or edges array.")
+
+    raw_triples = data.get("triples") or data.get("edges") or []
+    if not isinstance(raw_triples, list):
+        raise ValueError("Graph JSON triples/edges must be an array.")
+
+    node_ids: List[str] = []
+    seen_nodes: set[str] = set()
+    for node in data.get("nodes") or []:
+        node_id = _node_id_from_payload(node)
+        if node_id and node_id not in seen_nodes:
+            seen_nodes.add(node_id)
+            node_ids.append(node_id)
+
+    valid_triples: List[dict] = []
+    for triple in raw_triples:
+        if not isinstance(triple, dict):
+            continue
+        subject = _triple_subject(triple)
+        obj = _triple_object(triple)
+        if not subject or not obj:
+            continue
+        valid_triples.append(triple)
+        for node_id in (subject, obj):
+            if node_id not in seen_nodes:
+                seen_nodes.add(node_id)
+                node_ids.append(node_id)
+
+    _validate_graph_parts(node_ids, valid_triples)
+    return node_ids, valid_triples
+
+
+def _graph_id_for_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()[:24]
+
+
 def build_incident_triples(node_ids, triples):
     incident = {n: [] for n in node_ids}
     for tri in triples:
@@ -141,9 +373,7 @@ def build_state(
     cache_dir: Path,
     *,
     embedder: Any | None = None,
-    kge_enabled: bool = True,
     embed_model: str = "text-embedding-3-small",
-    retriever_method: str = "normal",
     semantic_threshold: float = 0.05,
     structural_threshold: float = 0.05,
     llm_enabled: bool | None = None,
@@ -157,8 +387,6 @@ def build_state(
         graph_path=graph_path,
         cache_dir=cache_dir,
         text_embedder=embedder,
-        kge_enabled=kge_enabled,
-        method=retriever_method,
         semantic_threshold=semantic_threshold,
         structural_threshold=structural_threshold,
     )
@@ -167,7 +395,7 @@ def build_state(
     return KGRagState(
         graph=retriever.graph,
         retriever=retriever,
-        retriever_method=getattr(retriever, "method", normalize_retriever_method(retriever_method)),
+        retriever_method=getattr(retriever, "method", "ALEQ"),
         graph_path=graph_path,
         cache_dir=cache_dir,
         incident_triples=incident_triples,
@@ -367,18 +595,33 @@ def extract_nodes_from_pyvis_html(html: str) -> List[str]:
 KG_RAG_INJECTION_TEMPLATE = Path(__file__).resolve().parent / "templates" / "kg_rag_injection.tmpl"
 
 
-def build_kg_rag_injection() -> str:
+def build_kg_rag_injection(graph_id: str | None = None) -> str:
     """Load the HTML/CSS/JS template that turns PyVis into a KG-RAG workbench."""
 
     try:
-        return KG_RAG_INJECTION_TEMPLATE.read_text(encoding="utf-8")
+        template = KG_RAG_INJECTION_TEMPLATE.read_text(encoding="utf-8")
     except OSError as exc:
         raise SystemExit(
             f"[kg_rag_app] KG-RAG injection template not found: {KG_RAG_INJECTION_TEMPLATE}"
         ) from exc
 
+    config = (
+        "<script type=\"text/javascript\">"
+        f"window.KG_RAG_GRAPH_ID = {json.dumps(graph_id)};"
+        f"window.KG_RAG_EVIDENCE_PREVIEW_CHARS = {EVIDENCE_PREVIEW_CHARS};"
+        "</script>\n"
+    )
+    return config + template
 
-def build_pyvis_html(graph_path: Path, height: str = "1000px", width: str = "100%") -> str:
+
+def build_pyvis_html(
+    graph_path: Path,
+    height: str = "1000px",
+    width: str = "100%",
+    *,
+    graph_id: str | None = None,
+    html_path: Path | None = None,
+) -> str:
     """
     Use the existing pyvis_view.py script to generate the base HTML
     (with all the project's filtering/physics settings), then inject
@@ -386,8 +629,13 @@ def build_pyvis_html(graph_path: Path, height: str = "1000px", width: str = "100
 
     This keeps behavior consistent with the rest of the project.
     """
-    # Where to put the temporary HTML (pyvis_view's output)
-    html_path = Path("kg_rag_temp.html")
+    if html_path is None:
+        rendered_dir = Path(".kg_cache") / "rendered"
+        rendered_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", graph_id or graph_path.stem)
+        html_path = rendered_dir / f"{safe_name}.html"
+    else:
+        html_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Path to pyvis_view.py in the same repo
     pyvis_view_path = Path(__file__).with_name("pyvis_view.py")
@@ -395,33 +643,32 @@ def build_pyvis_html(graph_path: Path, height: str = "1000px", width: str = "100
     if not pyvis_view_path.exists():
         raise SystemExit(f"[kg_rag_app] pyvis_view.py not found at {pyvis_view_path}")
 
-    # Build the command for pyvis_view.
-    cmd = [
-        sys.executable,
-        str(pyvis_view_path),
-        "--input", str(graph_path),
-        "--html", str(html_path),
-        "--weight", ">=0",
-        "--k-core", "0",
-        "--max-nodes", "500",
-        "--max-edges", "600",
-        "--label-top", "20",
-        "--physics", "barnesHut",
-        "--largest-only",
-        "--directed",
-        "--select-menu",
-        "--filter-menu",
-        "--config-ui",
-        "--theme", "dark",
-        "--cdn-resources", "in_line",
-    ]
+    if not html_path.exists():
+        cmd = [
+            sys.executable,
+            str(pyvis_view_path),
+            "--input", str(graph_path),
+            "--html", str(html_path),
+            "--weight", ">=0",
+            "--k-core", "0",
+            "--max-nodes", "500",
+            "--max-edges", "600",
+            "--label-top", "20",
+            "--physics", "barnesHut",
+            "--largest-only",
+            "--directed",
+            "--select-menu",
+            "--filter-menu",
+            "--config-ui",
+            "--theme", "dark",
+            "--cdn-resources", "in_line",
+        ]
 
-    # Run pyvis_view to generate the HTML
-    try:
-        print(f"[kg_rag_app] Running pyvis_view: {' '.join(cmd)}")
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as e:
-        raise SystemExit(f"[kg_rag_app] pyvis_view.py failed: {e}") from e
+        try:
+            print(f"[kg_rag_app] Running pyvis_view: {' '.join(cmd)}")
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            raise SystemExit(f"[kg_rag_app] pyvis_view.py failed: {e}") from e
 
     if not html_path.exists():
         raise SystemExit(f"[kg_rag_app] Expected HTML not found: {html_path}")
@@ -429,7 +676,7 @@ def build_pyvis_html(graph_path: Path, height: str = "1000px", width: str = "100
     # Load the generated HTML
     html = html_path.read_text(encoding="utf-8")
 
-    injection = build_kg_rag_injection()
+    injection = build_kg_rag_injection(graph_id)
     if "</body>" in html:
         html = html.replace("</body>", injection + "\n</body>")
     else:
@@ -590,41 +837,348 @@ def build_query_payload(
         "answer": answer,
         "llm_enabled": bool(include_answer and state.llm_enabled),
         "llm_available": _llm_available(),
+        "retriever_method": state.retriever_method,
         "highlight": build_highlight_payload(result),
         "debug_scores": result.debug_scores,
     }
 
 
-def create_app(state: KGRagState) -> Flask:
+def _truncate_text(text: str, limit: int = EVIDENCE_PREVIEW_CHARS) -> str:
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _source_payload(source: Any) -> Dict[str, Any]:
+    if not isinstance(source, dict):
+        return {"raw": str(source)}
+    return {
+        "doc_id": source.get("doc_id"),
+        "sentence_id": source.get("sentence_id"),
+        "char_span": source.get("char_span"),
+        "confidence": source.get("confidence"),
+        "filename": (source.get("doc_meta") or {}).get("filename"),
+        "evidence": source.get("evidence"),
+    }
+
+
+def _format_source(source: Any) -> str:
+    payload = _source_payload(source)
+    pieces: List[str] = []
+    filename = payload.get("filename")
+    if filename:
+        pieces.append(f"File: {filename}")
+    doc_id = payload.get("doc_id")
+    if doc_id:
+        pieces.append(f"Doc ID: {doc_id}")
+    sentence_id = payload.get("sentence_id")
+    if sentence_id is not None:
+        pieces.append(f"Sentence: {sentence_id}")
+    char_span = payload.get("char_span")
+    if char_span is not None:
+        pieces.append(f"Span: {char_span}")
+    confidence = payload.get("confidence")
+    if confidence is not None:
+        pieces.append(f"Confidence: {confidence}")
+    evidence = payload.get("evidence")
+    if evidence:
+        pieces.append(f"Evidence: {evidence}")
+    if pieces:
+        return "\n".join(str(piece) for piece in pieces)
+    return str(payload.get("raw") or source or "")
+
+
+def _matching_triples(
+    triples: Iterable[dict],
+    *,
+    subject: str = "",
+    obj: str = "",
+    relation: str = "",
+    node_id: str = "",
+) -> List[dict]:
+    matches: List[dict] = []
+    for triple in triples:
+        h = _triple_subject(triple)
+        t = _triple_object(triple)
+        r = _triple_relation(triple)
+        if node_id and node_id not in {h, t}:
+            continue
+        if subject and obj and {subject, obj} != {h, t}:
+            continue
+        if relation and r and relation != r:
+            continue
+        matches.append(triple)
+    return matches
+
+
+def build_provenance_payload(
+    record: KGGraphRecord,
+    *,
+    item_type: str,
+    node_id: str = "",
+    subject: str = "",
+    obj: str = "",
+    relation: str = "",
+    preview_chars: int = EVIDENCE_PREVIEW_CHARS,
+) -> Dict[str, Any]:
+    if item_type == "node":
+        triples = _matching_triples(record.triples, node_id=node_id)
+        title = node_id or "Node"
+    elif item_type == "edge":
+        triples = _matching_triples(
+            record.triples,
+            subject=subject,
+            obj=obj,
+            relation=relation,
+        )
+        title = f"{subject} --[{relation or 'related to'}]-- {obj}".strip()
+    else:
+        raise ValueError("item_type must be node or edge")
+
+    lines = [title, f"{len(triples)} connected evidence triple(s)."]
+    triple_payloads: List[Dict[str, Any]] = []
+    for index, triple in enumerate(triples, start=1):
+        h = _triple_subject(triple)
+        r = _triple_relation(triple) or "related to"
+        t = _triple_object(triple)
+        sources = triple.get("sources") or []
+        lines.append("")
+        lines.append(f"{index}. {h} --[{r}]--> {t}")
+        if triple.get("weight") is not None:
+            lines.append(f"Weight: {triple.get('weight')}")
+        for source in sources:
+            formatted = _format_source(source)
+            if formatted:
+                lines.append(formatted)
+        triple_payloads.append(
+            {
+                "subject": h,
+                "relation": r,
+                "object": t,
+                "weight": triple.get("weight", 1),
+                "sources": [_source_payload(source) for source in sources],
+            }
+        )
+
+    full_text = "\n".join(lines).strip()
+    return {
+        "graph_id": record.graph_id,
+        "type": item_type,
+        "title": title,
+        "preview": _truncate_text(full_text, preview_chars),
+        "preview_chars": int(preview_chars),
+        "full_text": full_text,
+        "is_truncated": len(re.sub(r"\s+", " ", full_text).strip()) > preview_chars,
+        "triples": triple_payloads,
+    }
+
+
+def render_upload_page(error: str = "") -> str:
+    error_html = (
+        f'<div class="upload-error">{html.escape(error)}</div>'
+        if error
+        else ""
+    )
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KG-RAG Workbench</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #050816;
+      color: #e5e7eb;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background:
+        linear-gradient(rgba(148, 163, 184, 0.09) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px),
+        #050816;
+      background-size: 36px 36px;
+    }}
+    main {{
+      width: min(520px, calc(100vw - 32px));
+      padding: 22px;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.94);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+    }}
+    h1 {{
+      margin: 0 0 6px;
+      font-size: 24px;
+      letter-spacing: 0;
+    }}
+    p {{
+      margin: 0 0 18px;
+      color: #94a3b8;
+      line-height: 1.5;
+    }}
+    input[type="file"] {{
+      display: block;
+      width: 100%;
+      min-height: 42px;
+      padding: 8px;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      background: #020617;
+      color: #e5e7eb;
+    }}
+    button {{
+      width: 100%;
+      height: 40px;
+      margin-top: 12px;
+      border: 1px solid #f59e0b;
+      border-radius: 6px;
+      background: #facc15;
+      color: #111827;
+      font-weight: 750;
+      cursor: pointer;
+    }}
+    button:hover {{ background: #fde047; }}
+    .upload-error {{
+      margin-bottom: 12px;
+      padding: 9px 10px;
+      border: 1px solid rgba(248, 113, 113, 0.55);
+      border-radius: 6px;
+      background: rgba(127, 29, 29, 0.35);
+      color: #fecaca;
+      font-size: 13px;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>KG-RAG Workbench</h1>
+    <p>Upload a knowledge-graph JSON file to render an interactive graph and query it with ALEQ retrieval.</p>
+    {error_html}
+    <form method="post" action="/upload" enctype="multipart/form-data">
+      <input name="graph" type="file" accept=".json,application/json" required />
+      <button type="submit">Upload graph JSON</button>
+    </form>
+  </main>
+</body>
+</html>"""
+
+
+def _registry_from_state(state: KGRagState) -> KGGraphRegistry:
+    registry = KGGraphRegistry(
+        cache_dir=state.cache_dir,
+        llm_enabled=state.llm_enabled,
+    )
+    node_ids = [record["id"] for record in state.retriever.node_records]
+    graph_id = DEFAULT_GRAPH_ID
+    registry.records[graph_id] = KGGraphRecord(
+        graph_id=graph_id,
+        graph_path=state.graph_path,
+        cache_dir=state.cache_dir,
+        source_name=state.graph_path.name,
+        node_ids=node_ids,
+        triples=state.retriever.triples,
+        incident_triples=state.incident_triples,
+        visible_node_ids=state.visible_node_ids,
+    )
+    registry.default_graph_id = graph_id
+    registry.states[graph_id] = state
+    return registry
+
+
+def create_app(state: KGRagState | KGGraphRegistry | None = None) -> Flask:
+    if isinstance(state, KGGraphRegistry):
+        registry = state
+    elif isinstance(state, KGRagState):
+        registry = _registry_from_state(state)
+    else:
+        registry = KGGraphRegistry(cache_dir=Path(os.getenv("KG_CACHE_DIR", ".kg_cache")))
+
     app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("KG_UPLOAD_MAX_BYTES", str(100 * 1024 * 1024)))
 
     @app.route("/")
     def index():
-        html = build_pyvis_html(state.graph_path)
-        # restrict node_ids to visible nodes from the HTML
-        filtered_ids = extract_nodes_from_pyvis_html(html)
+        if registry.default_graph_id and registry.default_graph_id in registry.records:
+            return redirect(url_for("graph_page", graph_id=registry.default_graph_id))
+        return render_upload_page()
+
+    @app.route("/upload", methods=["POST"])
+    def upload_graph():
+        file_storage = request.files.get("graph")
+        if file_storage is None:
+            return render_upload_page("Choose a graph JSON file to upload."), 400
+        try:
+            record = registry.register_upload(file_storage)
+        except ValueError as exc:
+            return render_upload_page(str(exc)), 400
+        return redirect(url_for("graph_page", graph_id=record.graph_id))
+
+    @app.route("/graph/<graph_id>", methods=["GET"])
+    def graph_page(graph_id: str):
+        try:
+            record = registry.get_record(graph_id)
+        except KeyError:
+            return render_upload_page("That graph is not loaded in this server session."), 404
+
+        html_text = build_pyvis_html(
+            record.graph_path,
+            graph_id=record.graph_id,
+            html_path=registry.render_path(record.graph_id),
+        )
+        filtered_ids = extract_nodes_from_pyvis_html(html_text)
         if filtered_ids:
-            print(f"[kg_rag_app] Filtered visible nodes: {len(filtered_ids)}")
-            state.visible_node_ids = filtered_ids
+            print(f"[kg_rag_app] Filtered visible nodes for {record.graph_id}: {len(filtered_ids)}")
+            registry.set_visible_node_ids(record.graph_id, filtered_ids)
         else:
-            # this should not happen bc we only filter using --largest-only
             print("[kg_rag_app] WARNING: no filtered nodes extracted; keeping full retriever node set")
 
-        return html
+        return html_text
+
+    def _payload_graph_id(payload: Dict[str, Any]) -> str | None:
+        return str(payload.get("graph_id") or payload.get("graphId") or "").strip() or None
+
+    def _state_from_payload(payload: Dict[str, Any]) -> KGRagState:
+        graph_id = _payload_graph_id(payload)
+        return registry.get_state(graph_id=graph_id)
 
     @app.route("/healthz", methods=["GET"])
     def healthz():
+        graph_id = registry.resolve_graph_id(request.args.get("graph_id"))
+        if not graph_id or graph_id not in registry.records:
+            return jsonify(
+                {
+                    "status": "ok",
+                    "graph_loaded": False,
+                    "graph_count": len(registry.records),
+                    "cache_dir": str(registry.cache_dir),
+                    "llm_enabled": registry.llm_enabled,
+                    "llm_available": _llm_available(),
+                }
+            )
+
+        record = registry.records[graph_id]
+        cached_state = registry.states.get(graph_id)
         return jsonify(
             {
                 "status": "ok",
-                "graph_path": str(state.graph_path),
-                "cache_dir": str(state.cache_dir),
-                "retriever_method": state.retriever_method,
-                "llm_enabled": state.llm_enabled,
+                "graph_loaded": True,
+                "graph_id": graph_id,
+                "graph_path": str(record.graph_path),
+                "cache_dir": str(registry.cache_dir),
+                "retriever_method": "ALEQ",
+                "llm_enabled": registry.llm_enabled,
                 "llm_available": _llm_available(),
-                "node_count": len(state.retriever.node_records),
-                "triple_count": len(state.retriever.triple_records),
-                "kge": state.retriever.kge.metadata,
+                "node_count": record.node_count,
+                "triple_count": record.triple_count,
+                "visible_node_count": len(record.visible_node_ids),
+                "kge": cached_state.retriever.kge.metadata if cached_state is not None else {"status": "not_loaded"},
             }
         )
 
@@ -635,22 +1189,25 @@ def create_app(state: KGRagState) -> Flask:
             question = payload.get("query", "").strip()
             top_n = int(payload.get("top_n", 15))
             hop_limit = int(payload.get("hop_limit", 2))
-            include_answer = bool(payload.get("include_answer", True)) and state.llm_enabled
-        except Exception:
-            return jsonify({"error": "Invalid JSON payload."}), 400
+            query_state = _state_from_payload(payload)
+            include_answer = bool(payload.get("include_answer", True)) and query_state.llm_enabled
+        except Exception as exc:
+            return jsonify({"error": f"Invalid JSON payload: {exc}"}), 400
 
         if not question:
             return jsonify({"error": "Empty query."}), 400
 
         try:
+            record = registry.get_record(_payload_graph_id(payload))
             response_payload = build_query_payload(
-                state,
+                query_state,
                 question=question,
                 top_n=top_n,
                 hop_limit=hop_limit,
-                visible_node_ids=state.visible_node_ids or None,
+                visible_node_ids=record.visible_node_ids or None,
                 include_answer=include_answer,
             )
+            response_payload["graph_id"] = record.graph_id
         except Exception as e:
             return jsonify({"error": f"Retrieval failed: {e}"}), 500
 
@@ -663,22 +1220,25 @@ def create_app(state: KGRagState) -> Flask:
             question = str(payload.get("query") or payload.get("question") or "").strip()
             top_n = int(payload.get("top_k", payload.get("top_n", 10)))
             hop_limit = int(payload.get("hop_limit", 2))
-            include_answer = bool(payload.get("include_answer", False)) and state.llm_enabled
-        except Exception:
-            return jsonify({"error": "Invalid JSON payload."}), 400
+            query_state = _state_from_payload(payload)
+            include_answer = bool(payload.get("include_answer", False)) and query_state.llm_enabled
+        except Exception as exc:
+            return jsonify({"error": f"Invalid JSON payload: {exc}"}), 400
 
         if not question:
             return jsonify({"error": "Empty query."}), 400
 
         try:
+            record = registry.get_record(_payload_graph_id(payload))
             response_payload = build_query_payload(
-                state,
+                query_state,
                 question=question,
                 top_n=top_n,
                 hop_limit=hop_limit,
                 visible_node_ids=None,
                 include_answer=include_answer,
             )
+            response_payload["graph_id"] = record.graph_id
         except Exception as e:
             return jsonify({"error": f"Retrieval failed: {e}"}), 500
 
@@ -692,8 +1252,9 @@ def create_app(state: KGRagState) -> Flask:
             context = str(payload.get("context") or "").strip()
             top_n = int(payload.get("top_k", payload.get("top_n", 10)))
             hop_limit = int(payload.get("hop_limit", 2))
-        except Exception:
-            return jsonify({"error": "Invalid JSON payload."}), 400
+            query_state = _state_from_payload(payload)
+        except Exception as exc:
+            return jsonify({"error": f"Invalid JSON payload: {exc}"}), 400
 
         if not question:
             return jsonify({"error": "Empty query."}), 400
@@ -702,7 +1263,7 @@ def create_app(state: KGRagState) -> Flask:
         if not context:
             try:
                 retrieval_payload = build_query_payload(
-                    state,
+                    query_state,
                     question=question,
                     top_n=top_n,
                     hop_limit=hop_limit,
@@ -713,7 +1274,7 @@ def create_app(state: KGRagState) -> Flask:
                 return jsonify({"error": f"Retrieval failed: {e}"}), 500
             context = retrieval_payload["context"]
 
-        answer = maybe_call_llm_answer(question, context, enabled=state.llm_enabled)
+        answer = maybe_call_llm_answer(question, context, enabled=query_state.llm_enabled)
         response_payload = {
             "question": question,
             "context": context,
@@ -735,16 +1296,17 @@ def create_app(state: KGRagState) -> Flask:
             question = (payload.get("query") or "").strip()
             node_id = str(payload.get("node_id") or "").strip()
             global_answer = (payload.get("global_answer") or "").strip()
-            include_explanation = bool(payload.get("include_explanation", True)) and state.llm_enabled
-        except Exception:
-            return jsonify({"error": "Invalid JSON payload."}), 400
+            query_state = _state_from_payload(payload)
+            include_explanation = bool(payload.get("include_explanation", True)) and query_state.llm_enabled
+        except Exception as exc:
+            return jsonify({"error": f"Invalid JSON payload: {exc}"}), 400
 
         if not question:
             return jsonify({"error": "Empty query."}), 400
         if not node_id:
             return jsonify({"error": "Missing node_id."}), 400
 
-        node_triples = state.incident_triples.get(node_id, [])
+        node_triples = query_state.incident_triples.get(node_id, [])
         context = build_llm_context(
             triples=node_triples,
             focus_nodes=[node_id],
@@ -770,6 +1332,38 @@ def create_app(state: KGRagState) -> Flask:
     @app.route("/api/node-explain", methods=["POST"])
     def api_node_explain():
         return node_explain()
+
+    @app.route("/api/provenance", methods=["POST", "GET"])
+    def api_provenance():
+        try:
+            if request.method == "POST":
+                payload = request.get_json(force=True) or {}
+            else:
+                payload = dict(request.args)
+            record = registry.get_record(_payload_graph_id(payload))
+            item_type = str(payload.get("type") or payload.get("item_type") or "").strip()
+            node_id = str(payload.get("node_id") or payload.get("id") or "").strip()
+            subject = str(payload.get("from") or payload.get("subject") or "").strip()
+            obj = str(payload.get("to") or payload.get("object") or "").strip()
+            relation = str(payload.get("relation") or "").strip()
+            preview_chars = int(payload.get("preview_chars", EVIDENCE_PREVIEW_CHARS))
+        except Exception as exc:
+            return jsonify({"error": f"Invalid provenance request: {exc}"}), 400
+
+        try:
+            return jsonify(
+                build_provenance_payload(
+                    record,
+                    item_type=item_type,
+                    node_id=node_id,
+                    subject=subject,
+                    obj=obj,
+                    relation=relation,
+                    preview_chars=preview_chars,
+                )
+            )
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 400
     
 
     return app
@@ -780,35 +1374,32 @@ def create_app_from_env(
 ) -> Flask:
     """Create the Flask app using environment variables for container deploys."""
 
-    graph_path = Path(os.getenv("KG_GRAPH_PATH", "graph.json"))
+    graph_path_env = os.getenv("KG_GRAPH_PATH")
     cache_dir = Path(os.getenv("KG_CACHE_DIR", ".kg_cache"))
     embed_model = os.getenv("KG_OPENAI_EMBED_MODEL", "text-embedding-3-small")
-    kge_enabled = _env_bool("KG_KGE_ENABLED", True)
-    retriever_method = normalize_retriever_method(os.getenv("KG_RETRIEVER_METHOD", "normal"))
     semantic_threshold = float(os.getenv("KG_SEMANTIC_THRESHOLD", "0.05"))
     structural_threshold = float(os.getenv("KG_STRUCTURAL_THRESHOLD", "0.05"))
     llm_enabled = _resolve_llm_enabled()
 
-    if not graph_path.exists():
-        raise SystemExit(f"[kg_rag_app] Graph file not found: {graph_path}")
-
-    if embedder_factory is None:
-        embedder = Embedder(use_api="openai", model_name=embed_model)
-    else:
-        embedder = embedder_factory(embed_model)
-
-    state = build_state(
-        graph_path=graph_path,
+    registry = KGGraphRegistry(
         cache_dir=cache_dir,
-        embedder=embedder,
-        kge_enabled=kge_enabled,
         embed_model=embed_model,
-        retriever_method=retriever_method,
+        embedder_factory=embedder_factory,
         semantic_threshold=semantic_threshold,
         structural_threshold=structural_threshold,
         llm_enabled=llm_enabled,
     )
-    return create_app(state)
+
+    if graph_path_env:
+        graph_path = Path(graph_path_env)
+        if not graph_path.exists():
+            raise SystemExit(f"[kg_rag_app] Graph file not found: {graph_path}")
+        try:
+            registry.register_existing_graph(graph_path)
+        except ValueError as exc:
+            raise SystemExit(f"[kg_rag_app] Invalid graph file {graph_path}: {exc}") from exc
+
+    return create_app(registry)
 
     
 # ---- CLI entrypoint ---------------------------------------------------------
@@ -823,26 +1414,10 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--cache-dir", type=str, default=os.getenv("KG_CACHE_DIR", ".kg_cache"),
                     help="Directory to cache node embeddings.")
     ap.add_argument(
-        "--disable-kge",
-        action="store_true",
-        help="Disable optional RotatE/PyKEEN graph-embedding artifacts.",
-    )
-    ap.add_argument(
         "--embed-model",
         type=str,
         default=os.getenv("KG_OPENAI_EMBED_MODEL", "text-embedding-3-small"),
         help="Embedding model name forwarded into Embedder.",
-    )
-    ap.add_argument(
-        "--retriever-method",
-        type=normalize_retriever_method,
-        choices=RETRIEVER_METHOD_CHOICES,
-        default=normalize_retriever_method(os.getenv("KG_RETRIEVER_METHOD", "normal")),
-        metavar="{normal,ALEQ}",
-        help=(
-            "KG retrieval method: normal is the default project retriever; "
-            "ALEQ is Adaptive Locating and Expanding Query."
-        ),
     )
     ap.add_argument(
         "--semantic-threshold",
@@ -879,32 +1454,34 @@ def main():
     elif graph_path_env:
         graph_path = Path(graph_path_env)
     else:
-        graph_path = Path("graph.json")
-
-    if not graph_path.exists():
-        raise SystemExit(f"[kg_rag_app] Graph file not found: {graph_path}")
+        graph_path = None
 
     cache_dir = Path(args.cache_dir)
     llm_enabled = _resolve_llm_enabled(enable_llm=args.enable_llm, disable_llm=args.disable_llm)
     if args.enable_llm and not _llm_available():
         print("[kg_rag_app] WARNING: --enable-llm was set, but OPENAI_API_KEY is not available.")
 
-    state = build_state(
-        graph_path=graph_path,
+    registry = KGGraphRegistry(
         cache_dir=cache_dir,
-        embedder=Embedder(use_api="openai", model_name=args.embed_model),
-        kge_enabled=not args.disable_kge,
         embed_model=args.embed_model,
-        retriever_method=args.retriever_method,
         semantic_threshold=args.semantic_threshold,
         structural_threshold=args.structural_threshold,
         llm_enabled=llm_enabled,
     )
 
-    app = create_app(state)
+    if graph_path is not None:
+        if not graph_path.exists():
+            raise SystemExit(f"[kg_rag_app] Graph file not found: {graph_path}")
+        try:
+            registry.register_existing_graph(graph_path)
+        except ValueError as exc:
+            raise SystemExit(f"[kg_rag_app] Invalid graph file {graph_path}: {exc}") from exc
+
+    app = create_app(registry)
+    graph_label = graph_path if graph_path is not None else "upload-first"
     print(
         f"[kg_rag_app] Serving KG-RAG demo on http://{args.host}:{args.port} "
-        f"(graph={graph_path}, retriever={state.retriever_method}, llm={'on' if state.llm_enabled else 'off'})"
+        f"(graph={graph_label}, retriever=ALEQ, llm={'on' if registry.llm_enabled else 'off'})"
     )
     app.run(host=args.host, port=args.port, debug=False)
 

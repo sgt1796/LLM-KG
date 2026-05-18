@@ -11,9 +11,9 @@ but it deliberately reuses this repository's own KG contracts:
 * cached node/triple/relation embeddings
 * the shared ``QueryResult`` payload consumed by ``kg_rag_app.py``
 
-That keeps this retriever interchangeable with ``HybridKGRetriever`` while
-preserving the representative-node, semantic-filter, structural-filter, and
-path-verification steps from the semantic subgraph algorithm.
+That keeps this retriever compatible with the shared app and CLI contracts
+while preserving the representative-node, semantic-filter, structural-filter,
+and path-verification steps from the semantic subgraph algorithm.
 """
 
 from __future__ import annotations

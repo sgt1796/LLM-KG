@@ -14,7 +14,7 @@ entity extraction.
 - Build subject-relation-object triples with canonicalized relations.
 - Store evidence and provenance per triple.
 - Merge graphs and optionally dedupe/normalize large runs.
-- Visualize graphs with PyVis and query via the normal KG retriever + Flask app.
+- Visualize graphs with PyVis and query via the ALEQ KG retriever + Flask app.
 
 ## Recent changes
 
@@ -25,12 +25,10 @@ entity extraction.
 - LLM runs are now sent in small sentence batches instead of whole section-sized payloads.
 - Surface mentions are preserved for downstream triple extraction; canonical names are kept alongside them in structured LLM output.
 - The configured LLM model is now forwarded correctly into `PromptFunction.execute`, and the Ollama default typo was corrected from `minstral` to `mistral:7b`.
-- `kg_pipeline/rag.py` is now a reusable normal retriever instead of a placeholder.
-- The normal retriever combines alias/entity linking, node-text embeddings, triple-text embeddings, relation-intent matching, reciprocal-rank fusion, and short path extraction.
-- `kg_rag_app.py` now uses the retriever for `/query`, so app responses are grounded in ranked triples and paths rather than node-only cosine similarity.
-- The retriever writes per-graph cache sidecars under `.kg_cache/<graph_stem>/` for node, triple, relation, alias, and optional KGE artifacts.
-- Optional RotatE-style KGE support is implemented through `PyKEEN`; when `PyKEEN` is unavailable, retrieval cleanly falls back to text-only search.
-- `query_tools/SemanticSubgraphRetriever` adds a separate ALEQ-inspired semantic subgraph query mode that reuses the project graph schema, canonical relation lexicon, cached embeddings, and Flask response contract. ALEQ is the Adaptive Locating and Expanding Query algorithm from Wang et al., "From biomedical knowledge graph construction to semantic querying: a comprehensive approach" (Scientific Reports, 2025): https://www.nature.com/articles/s41598-025-93334-5.
+- `kg_pipeline/rag.py` exposes the ALEQ retriever as the only project query path.
+- `kg_rag_app.py` uses ALEQ for `/query`, `/api/search`, and `/api/answer`, so app responses are grounded in ranked triples and paths rather than node-only cosine similarity.
+- The retriever writes per-graph cache sidecars under `.kg_cache/<graph_stem>/` for node, triple, relation, and alias artifacts.
+- `query_tools/SemanticSubgraphRetriever` implements the ALEQ-inspired semantic subgraph query mode using the project graph schema, canonical relation lexicon, cached embeddings, and Flask response contract. ALEQ is the Adaptive Locating and Expanding Query algorithm from Wang et al., "From biomedical knowledge graph construction to semantic querying: a comprehensive approach" (Scientific Reports, 2025): https://www.nature.com/articles/s41598-025-93334-5.
 
 ## End-to-end workflow
 
@@ -43,7 +41,7 @@ uncomment steps to match your dataset). Typical flow:
 4) `dedupe.py` normalizes and merges large graphs (optional).
 5) `pyvis_view.py` generates an interactive HTML view.
 6) `python -m kg_pipeline.rag build` creates cached retrieval sidecars for a graph.
-7) `kg_rag_app.py` serves a KG-RAG web UI backed by the normal retriever.
+7) `kg_rag_app.py` serves a KG-RAG web UI backed by the ALEQ retriever.
 
 ## Quickstart
 
@@ -87,9 +85,9 @@ Run the KG-RAG Flask app:
 python kg_rag_app.py --graph graph_llm.json --host 0.0.0.0 --port 5000
 ```
 
-To serve the ALEQ retriever in the app, pass `--retriever-method ALEQ` or set
-`KG_RETRIEVER_METHOD=ALEQ`. ALEQ stands for Adaptive Locating and Expanding
-Query.
+You can also start the app without `--graph`; the first page will ask for a
+graph JSON upload and cache it under `.kg_cache/uploads`. The app uses ALEQ for
+every query.
 
 Build retriever caches from the command line:
 
@@ -102,23 +100,6 @@ Query the retriever directly from the command line:
 ```bash
 python -m kg_pipeline.rag query --graph graph_llm.json \
   --question "What causes ASD?" --top-k 10 --hop-limit 2
-```
-
-Use the ALEQ retriever instead of the default normal retriever:
-
-```bash
-python -m kg_pipeline.rag query --graph graph_llm.json \
-  --method ALEQ --question "What causes ASD?"
-```
-
-The default `normal` method is the original project retriever. It is not fused
-with the ALEQ method; selecting `--method ALEQ` switches to the alternative
-Adaptive Locating and Expanding Query retriever.
-
-If you want to skip optional KGE training:
-
-```bash
-python -m kg_pipeline.rag build --graph graph_llm.json --disable-kge
 ```
 
 ## Docker Deployment
@@ -210,8 +191,8 @@ Output is JSON with nodes and triples:
 ├── dedupe.py                  # Normalize and merge large graphs
 ├── pyvis_view.py              # Interactive HTML visualization
 ├── kg_rag_app.py              # Flask KG-RAG demo app
-├── kg_pipeline/rag.py         # Hybrid retriever + CLI
-├── query_tools/               # Semantic subgraph retriever option
+├── kg_pipeline/rag.py         # ALEQ retriever helpers + CLI
+├── query_tools/               # ALEQ semantic subgraph retriever
 ├── Embedder.py                # Embedding wrapper (OpenAI/Jina/local)
 └── llm_utils/                 # POP + LLM client adapters
 ```

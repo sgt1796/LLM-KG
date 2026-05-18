@@ -297,6 +297,48 @@
     color: #94a3b8;
     font-size: 11px;
   }
+  #kg-provenance-popup {
+    position: fixed;
+    z-index: 10000;
+    display: none;
+    width: min(360px, calc(100vw - 24px));
+    max-height: min(420px, calc(100vh - 24px));
+    padding: 9px;
+    border: 1px solid rgba(148, 163, 184, 0.42);
+    border-radius: 8px;
+    background: rgba(2, 6, 23, 0.97);
+    color: #e5e7eb;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 12px;
+  }
+  #kg-provenance-popup.is-pinned {
+    border-color: #facc15;
+  }
+  .kg-popup-title {
+    margin-bottom: 5px;
+    color: #f8fafc;
+    font-weight: 750;
+    overflow-wrap: anywhere;
+  }
+  .kg-popup-body {
+    max-height: 300px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: #cbd5e1;
+  }
+  .kg-popup-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .kg-popup-actions .kg-btn {
+    height: 28px;
+    padding: 0 8px;
+    font-size: 11px;
+  }
   @media (max-width: 680px) {
     body {
       overflow: auto;
@@ -379,6 +421,15 @@
   </div>
 </div>
 
+<div id="kg-provenance-popup" role="dialog" aria-live="polite">
+  <div class="kg-popup-title"></div>
+  <div class="kg-popup-body"></div>
+  <div class="kg-popup-actions">
+    <button id="kg-popup-load" class="kg-btn" type="button">Load more</button>
+    <button id="kg-popup-close" class="kg-btn" type="button">Close</button>
+  </div>
+</div>
+
 <script type="text/javascript">
 (function(){
   var panel = document.getElementById("kg-rag-panel");
@@ -404,6 +455,14 @@
     nodes: {},
     edges: {}
   };
+  var kgGraphId = window.KG_RAG_GRAPH_ID || null;
+  var kgPreviewLimit = Number(window.KG_RAG_EVIDENCE_PREVIEW_CHARS || 240);
+  var kgPopupState = {
+    pinned: false,
+    item: null,
+    loadKey: "",
+    loaded: false
+  };
 
   function clone(obj){
     return JSON.parse(JSON.stringify(obj || {}));
@@ -426,6 +485,12 @@
     if (kgOriginal.captured || typeof nodes === "undefined" || typeof edges === "undefined") return;
     nodes.get().forEach(function(node){ kgOriginal.nodes[node.id] = clone(node); });
     edges.get().forEach(function(edge){ kgOriginal.edges[edge.id] = clone(edge); });
+    nodes.update(nodes.get().map(function(node){
+      return {id: node.id, kgTitle: node.title || "", title: ""};
+    }));
+    edges.update(edges.get().map(function(edge){
+      return {id: edge.id, kgTitle: edge.title || "", title: ""};
+    }));
     kgOriginal.captured = true;
   }
 
@@ -469,8 +534,15 @@
     return input ? !!input.checked : true;
   }
 
+  function withGraphPayload(payload){
+    payload = payload || {};
+    if (kgGraphId) payload.graph_id = kgGraphId;
+    return payload;
+  }
+
   function syncServerSettings(){
-    fetch("/healthz")
+    var url = kgGraphId ? "/healthz?graph_id=" + encodeURIComponent(kgGraphId) : "/healthz";
+    fetch(url)
       .then(function(res){ return res.ok ? res.json() : null; })
       .then(function(data){
         if (!data) return;
@@ -826,12 +898,12 @@
     fetch("/node_explain", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
+      body: JSON.stringify(withGraphPayload({
         query: q,
         node_id: node.id,
         global_answer: kgResult.globalAnswer,
         include_explanation: wantsLlm()
-      })
+      }))
     })
     .then(function(res){ return res.json(); })
     .then(function(data){
@@ -882,6 +954,153 @@
     setStatus("Evidence triple " + (index + 1) + " spotlighted.");
   }
 
+  function popupEl(){
+    return document.getElementById("kg-provenance-popup");
+  }
+
+  function popupTitleEl(){
+    var el = popupEl();
+    return el ? el.querySelector(".kg-popup-title") : null;
+  }
+
+  function popupBodyEl(){
+    var el = popupEl();
+    return el ? el.querySelector(".kg-popup-body") : null;
+  }
+
+  function popupLoadBtn(){
+    return document.getElementById("kg-popup-load");
+  }
+
+  function compactText(value, limit){
+    var text = String(value || "").replace(/\s+/g, " ").trim();
+    limit = limit || kgPreviewLimit;
+    return text.length > limit ? text.slice(0, Math.max(0, limit - 3)).trim() + "..." : text;
+  }
+
+  function popupPayload(item){
+    var payload = {
+      graph_id: kgGraphId,
+      preview_chars: kgPreviewLimit
+    };
+    if (!item) return payload;
+    if (item.type === "node") {
+      payload.type = "node";
+      payload.node_id = String(item.id || "");
+    } else {
+      payload.type = "edge";
+      payload.from = String(item.from || "");
+      payload.to = String(item.to || "");
+      payload.relation = String(item.relation || "");
+    }
+    return payload;
+  }
+
+  function popupKey(item){
+    if (!item) return "";
+    if (item.type === "node") return "node:" + String(item.id || "");
+    return "edge:" + String(item.from || "") + ":" + String(item.to || "") + ":" + String(item.relation || "");
+  }
+
+  function positionPopup(point){
+    var el = popupEl();
+    if (!el || !point) return;
+    var left = Number(point.x || point.clientX || 16) + 16;
+    var top = Number(point.y || point.clientY || 16) + 16;
+    var rect = el.getBoundingClientRect();
+    left = Math.min(Math.max(8, left), window.innerWidth - rect.width - 8);
+    top = Math.min(Math.max(8, top), window.innerHeight - rect.height - 8);
+    el.style.left = left + "px";
+    el.style.top = top + "px";
+  }
+
+  function setPopupContent(title, body, pinned, loaded){
+    var el = popupEl();
+    var titleEl = popupTitleEl();
+    var bodyEl = popupBodyEl();
+    var loadBtn = popupLoadBtn();
+    if (!el || !titleEl || !bodyEl || !loadBtn) return;
+    titleEl.textContent = title || "Graph evidence";
+    bodyEl.textContent = body || "No evidence text available.";
+    el.style.display = "block";
+    el.classList.toggle("is-pinned", !!pinned);
+    loadBtn.textContent = loaded ? "Loaded" : "Load more";
+    loadBtn.disabled = !!loaded;
+  }
+
+  function showProvenancePopup(item, point, pinned){
+    if (!item) return;
+    kgPopupState.item = item;
+    kgPopupState.pinned = !!pinned;
+    kgPopupState.loadKey = popupKey(item);
+    kgPopupState.loaded = false;
+    var title = item.label || item.id || item.relation || "Graph evidence";
+    var body = compactText(item.title || title, kgPreviewLimit);
+    setPopupContent(title, body, kgPopupState.pinned, false);
+    positionPopup(point);
+  }
+
+  function hideProvenancePopup(){
+    if (kgPopupState.pinned) return;
+    var el = popupEl();
+    if (el) el.style.display = "none";
+  }
+
+  function loadPopupEvidence(){
+    if (!kgPopupState.item) return;
+    kgPopupState.pinned = true;
+    setPopupContent(
+      kgPopupState.item.label || kgPopupState.item.id || "Graph evidence",
+      "Loading full evidence...",
+      true,
+      false
+    );
+    fetch("/api/provenance", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(popupPayload(kgPopupState.item))
+    })
+    .then(function(res){
+      return res.json().then(function(data){
+        if (!res.ok) throw data;
+        return data;
+      });
+    })
+    .then(function(data){
+      kgPopupState.loaded = true;
+      setPopupContent(data.title || "Graph evidence", data.full_text || data.preview || "", true, true);
+    })
+    .catch(function(err){
+      console.error(err);
+      setPopupContent("Evidence unavailable", err && err.error ? err.error : "Could not load provenance.", true, false);
+    });
+  }
+
+  function nodePopupItem(nodeId){
+    var current = nodes.get(nodeId) || {};
+    var original = kgOriginal.nodes[nodeId] || current;
+    return {
+      type: "node",
+      id: String(nodeId),
+      label: original.label || String(nodeId),
+      title: original.title || current.kgTitle || String(nodeId)
+    };
+  }
+
+  function edgePopupItem(edgeId){
+    var current = edges.get(edgeId) || {};
+    var original = kgOriginal.edges[edgeId] || current;
+    return {
+      type: "edge",
+      id: String(edgeId),
+      from: String(original.from || current.from || ""),
+      to: String(original.to || current.to || ""),
+      relation: String(original.label || current.label || ""),
+      label: String(original.label || current.label || "Graph edge"),
+      title: original.title || current.kgTitle || String(original.label || current.label || "Graph edge")
+    };
+  }
+
   function clearWorkbench(){
     kgResult = {
       nodes: [],
@@ -900,6 +1119,9 @@
     setResultCount();
     updateNodePager();
     renderEvidenceList();
+    kgPopupState.pinned = false;
+    var popup = popupEl();
+    if (popup) popup.style.display = "none";
     resetGraphStyles();
   }
 
@@ -920,7 +1142,12 @@
     fetch("/query", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({query: q, top_n: topN, hop_limit: hopLimit, include_answer: wantsLlm()})
+      body: JSON.stringify(withGraphPayload({
+        query: q,
+        top_n: topN,
+        hop_limit: hopLimit,
+        include_answer: wantsLlm()
+      }))
     })
     .then(function(res){
       return res.json().then(function(data){
@@ -973,6 +1200,8 @@
     var nextBtn = document.getElementById("kg-next-node");
     var fitBtn = document.getElementById("kg-fit-btn");
     var clearBtn = document.getElementById("kg-clear-btn");
+    var popupClose = document.getElementById("kg-popup-close");
+    var popupLoad = document.getElementById("kg-popup-load");
 
     if (btn) btn.addEventListener("click", sendQuery);
     if (input) {
@@ -984,6 +1213,16 @@
     if (nextBtn) nextBtn.addEventListener("click", function(){ showNodeAt(kgResult.currentIndex + 1); });
     if (fitBtn) fitBtn.addEventListener("click", fitHighlightedGraph);
     if (clearBtn) clearBtn.addEventListener("click", clearWorkbench);
+    if (popupClose) popupClose.addEventListener("click", function(){
+      kgPopupState.pinned = false;
+      var el = popupEl();
+      if (el) el.style.display = "none";
+    });
+    if (popupLoad) popupLoad.addEventListener("click", function(ev){
+      ev.preventDefault();
+      ev.stopPropagation();
+      loadPopupEvidence();
+    });
     syncServerSettings();
 
     network.on("selectNode", function(params){
@@ -991,6 +1230,28 @@
       var selectedId = String(params.nodes[0]);
       var idx = kgResult.nodes.findIndex(function(node){ return node.id === selectedId; });
       if (idx >= 0 && idx !== kgResult.currentIndex) showNodeAt(idx);
+    });
+    network.on("hoverNode", function(params){
+      if (kgPopupState.pinned) return;
+      showProvenancePopup(nodePopupItem(params.node), params.pointer && params.pointer.DOM, false);
+    });
+    network.on("blurNode", hideProvenancePopup);
+    network.on("hoverEdge", function(params){
+      if (kgPopupState.pinned) return;
+      showProvenancePopup(edgePopupItem(params.edge), params.pointer && params.pointer.DOM, false);
+    });
+    network.on("blurEdge", hideProvenancePopup);
+    network.on("click", function(params){
+      if (params.nodes && params.nodes.length) {
+        showProvenancePopup(nodePopupItem(params.nodes[0]), params.pointer && params.pointer.DOM, true);
+        return;
+      }
+      if (params.edges && params.edges.length) {
+        showProvenancePopup(edgePopupItem(params.edges[0]), params.pointer && params.pointer.DOM, true);
+        return;
+      }
+      kgPopupState.pinned = false;
+      hideProvenancePopup();
     });
   }
 
