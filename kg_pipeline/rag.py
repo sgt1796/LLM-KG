@@ -114,6 +114,37 @@ def query(
     return retriever.query(question=question, top_k=top_k, hop_limit=hop_limit, visible_node_ids=visible_node_ids)
 
 
+def _add_or_update_edge(
+    graph: nx.Graph,
+    subject: str,
+    obj: str,
+    relation: str,
+    weight: float,
+    raw_triple: Mapping[str, Any],
+) -> None:
+    """Add an undirected structural edge while preserving parallel triples."""
+
+    if graph.has_edge(subject, obj):
+        data = graph[subject][obj]
+        data["weight"] = float(data.get("weight", 0.0) or 0.0) + weight
+        relations = data.setdefault("relations", [])
+        if relation and relation not in relations:
+            relations.append(relation)
+        data.setdefault("raw_triples", []).append(dict(raw_triple))
+        return
+
+    relations = [relation] if relation else []
+    graph.add_edge(
+        subject,
+        obj,
+        relation=relation,
+        relations=relations,
+        weight=weight,
+        raw=dict(raw_triple),
+        raw_triples=[dict(raw_triple)],
+    )
+
+
 def _load_graph(path: Path) -> Tuple[nx.Graph, List[str], List[Dict[str, Any]]]:
     with open(path, "r", encoding="utf-8") as handle:
         data = json.load(handle)
@@ -133,8 +164,7 @@ def _load_graph(path: Path) -> Tuple[nx.Graph, List[str], List[Dict[str, Any]]]:
         weight = float(tri.get("weight", 1.0) or 1.0)
         graph.add_node(subject)
         graph.add_node(obj)
-        if not graph.has_edge(subject, obj):
-            graph.add_edge(subject, obj, relation=relation, weight=weight)
+        _add_or_update_edge(graph, subject, obj, relation, weight, tri)
     node_ids = sorted((str(node_id) for node_id in graph.nodes()), key=lambda item: item.casefold())
     return graph, node_ids, triples
 

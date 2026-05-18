@@ -148,7 +148,7 @@ Notes:
 - `--ner ollama` now defaults to `mistral:7b`.
 - LLM-based NER now runs sentence-first, in small batches, and uses a proposer-plus-verifier flow rather than one large section-level extraction call.
 - The LLM NER path keeps builder-facing entity sets as verbatim surface mentions so relation extraction in `kg_pipeline/triple_builder.py` can still match spans in the original sentence text.
-- The dynamic relation label store lives at `kg_pipeline/.kg_cache/labels.json`.
+- The dynamic relation label store lives at `kg_pipeline/.kg_cache/labels.json`; `main.py` emits first observations by default so small PDFs and rare valid relations are not silently dropped.
 
 ## Graph format
 

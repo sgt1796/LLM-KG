@@ -248,6 +248,37 @@ def _resolve_llm_enabled(*, enable_llm: bool = False, disable_llm: bool = False)
 # ---- Graph loading & embedding ----------------------------------------------
 
 
+def _add_or_update_graph_edge(
+    graph: nx.Graph,
+    subject: str,
+    obj: str,
+    relation: str,
+    weight: float,
+    raw_triple: dict,
+) -> None:
+    """Add an undirected app edge while retaining all pair-level triples."""
+
+    if graph.has_edge(subject, obj):
+        data = graph[subject][obj]
+        data["weight"] = float(data.get("weight", 0.0) or 0.0) + weight
+        relations = data.setdefault("relations", [])
+        if relation and relation not in relations:
+            relations.append(relation)
+        data.setdefault("raw_triples", []).append(dict(raw_triple))
+        return
+
+    relations = [relation] if relation else []
+    graph.add_edge(
+        subject,
+        obj,
+        relation=relation,
+        relations=relations,
+        weight=weight,
+        raw=dict(raw_triple),
+        raw_triples=[dict(raw_triple)],
+    )
+
+
 def load_graph(path: Path) -> Tuple[nx.Graph, List[str], List[dict]]:
     """
     Load a KG produced by main.py (triples format).
@@ -279,7 +310,7 @@ def load_graph(path: Path) -> Tuple[nx.Graph, List[str], List[dict]]:
             G.add_node(u)
         if not G.has_node(v):
             G.add_node(v)
-        G.add_edge(u, v, relation=r, weight=w, raw=tri)
+        _add_or_update_graph_edge(G, u, v, str(r or ""), w, tri)
 
     node_ids = list(G.nodes())
     print(f"[kg_rag_app] Loaded graph: nodes={len(node_ids)}, edges={G.number_of_edges()}")

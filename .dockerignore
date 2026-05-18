@@ -1,5 +1,8 @@
 .git
 .gitignore
+.env
+.env.*
+!.env.example
 .venv
 __pycache__/
 *.pyc
@@ -14,3 +17,10 @@ papers/
 GABA_papers/
 *.pdf
 *.html
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.token
+secrets/

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from kg_pipeline.label_store import LabelStore
 from kg_pipeline.triple_builder import TripletKnowledgeGraphBuilder
+from main import MAIN_LABEL_MIN_PROMOTE
 
 
 class TripletKnowledgeGraphBuilderTests(unittest.TestCase):
@@ -73,6 +74,20 @@ class TripletKnowledgeGraphBuilderTests(unittest.TestCase):
             self.assertEqual(store.labels["inhibits"]["count"], 2)
             triples = builder.to_dict()["triples"]
             self.assertEqual(len(triples), 1)
+            self.assertEqual(triples[0]["weight"], 1)
+
+    def test_main_label_store_setting_emits_first_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = LabelStore(Path(tmpdir) / "labels.json", min_promote=MAIN_LABEL_MIN_PROMOTE)
+            builder = TripletKnowledgeGraphBuilder(label_store=store)
+
+            builder.add_sentence("IL-6 inhibits TNF.", {"IL-6", "TNF"})
+
+            triples = builder.to_dict()["triples"]
+            self.assertEqual(len(triples), 1)
+            self.assertEqual(triples[0]["subject"], "IL-6")
+            self.assertEqual(triples[0]["relation"], "inhibits")
+            self.assertEqual(triples[0]["object"], "TNF")
             self.assertEqual(triples[0]["weight"], 1)
 
 

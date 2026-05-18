@@ -1,5 +1,8 @@
 import hashlib
+import importlib
 import json
+import os
+import sys
 import tempfile
 import unittest
 from io import BytesIO
@@ -8,8 +11,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from kg_pipeline.rag import build_index
-from kg_rag_app import KGGraphRegistry, KGRagState, build_incident_triples, create_app, create_app_from_env
+from kg_pipeline.rag import _load_graph, build_index
+from kg_rag_app import KGGraphRegistry, KGRagState, build_incident_triples, create_app, create_app_from_env, load_graph
 
 
 def _tokenize(text: str) -> list[str]:
@@ -217,6 +220,37 @@ class AleqRetrieverTests(unittest.TestCase):
             self.assertEqual(result.triples[0]["relation"], "treats")
             self.assertEqual(result.triples[0]["object"], "Autism Spectrum Disorder")
             self.assertTrue(result.focus_nodes)
+
+    def test_reciprocal_triples_are_aggregated_without_losing_records(self) -> None:
+        graph = {
+            "nodes": ["A", "B"],
+            "triples": [
+                {"subject": "A", "relation": "activates", "object": "B", "weight": 2},
+                {"subject": "B", "relation": "inhibits", "object": "A", "weight": 3},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            graph_path = Path(tmpdir) / "parallel.json"
+            with open(graph_path, "w", encoding="utf-8") as handle:
+                json.dump(graph, handle)
+
+            structural_graph, node_ids, triples = _load_graph(graph_path)
+
+            self.assertEqual(node_ids, ["A", "B"])
+            self.assertEqual(len(triples), 2)
+            self.assertEqual(structural_graph.number_of_edges(), 1)
+            edge_data = structural_graph.get_edge_data("A", "B")
+            self.assertEqual(edge_data["weight"], 5.0)
+            self.assertEqual(edge_data["relations"], ["activates", "inhibits"])
+            self.assertEqual(len(edge_data["raw_triples"]), 2)
+
+            retriever = build_index(graph_path, Path(tmpdir) / "cache", FakeEmbedder())
+            self.assertEqual(len(retriever.triple_records), 2)
+            best_id = retriever._best_edge_triple("A", "B")
+            self.assertEqual(retriever.triple_records[best_id]["relation"], "inhibits")
+
+            app_graph, _, _ = load_graph(graph_path)
+            self.assertEqual(app_graph.get_edge_data("A", "B")["weight"], 5.0)
 
 
 class FlaskRetrieverRegressionTests(unittest.TestCase):
@@ -430,6 +464,23 @@ class FlaskRetrieverRegressionTests(unittest.TestCase):
             payload = response.get_json()
             self.assertEqual(payload["graph_path"], str(graph_path))
             self.assertEqual(payload["cache_dir"], str(cache_dir))
+
+    def test_wsgi_module_exports_flask_app(self) -> None:
+        sys.modules.pop("wsgi", None)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(
+                os.environ,
+                {
+                    "KG_GRAPH_PATH": "",
+                    "KG_CACHE_DIR": str(Path(tmpdir) / "cache"),
+                    "KG_ENABLE_LLM_ANSWER": "false",
+                },
+                clear=False,
+            ):
+                module = importlib.import_module("wsgi")
+
+        self.assertIsNotNone(module.app)
+        self.assertTrue(hasattr(module.app, "test_client"))
 
 
 if __name__ == "__main__":

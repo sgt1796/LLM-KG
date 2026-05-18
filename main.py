@@ -33,6 +33,7 @@ from kg_pipeline.provenance import compute_doc_id, DocContext
 
 LABELS_PATH = Path("kg_pipeline/.kg_cache/labels.json")
 DEFAULT_LABELS = []
+MAIN_LABEL_MIN_PROMOTE = 1
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Extract a simple knowledge graph from PDF(s).")
@@ -82,10 +83,10 @@ def main() -> None:
     # 1) load existing dynamic labels, or create new store with defaults
     if LABELS_PATH.exists():
         print(f"Loading existing label store from: {LABELS_PATH}")
-        store = LabelStore(LABELS_PATH, max_labels=384, min_promote=2, sim_threshold=0.86)
+        store = LabelStore(LABELS_PATH, max_labels=384, min_promote=MAIN_LABEL_MIN_PROMOTE, sim_threshold=0.86)
     else:
         print("Initializing new label store with default labels.")
-        store = LabelStore(LABELS_PATH, max_labels=384, min_promote=2, sim_threshold=0.86)
+        store = LabelStore(LABELS_PATH, max_labels=384, min_promote=MAIN_LABEL_MIN_PROMOTE, sim_threshold=0.86)
         for lab in DEFAULT_LABELS:
             store.labels[lab] = {"count": 1, "first": 0, "last": 0}
         store.save()
